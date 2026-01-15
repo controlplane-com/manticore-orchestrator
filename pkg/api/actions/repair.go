@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
-	"github.com/controlplane-com/manticore-orchestrator/shared/cluster"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cluster"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 // ReplicaInfo holds collected information about a replica

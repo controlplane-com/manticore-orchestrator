@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 )
 
 // Import performs a coordinated import across all replicas

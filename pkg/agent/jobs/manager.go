@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 	"github.com/google/uuid"
 )
 

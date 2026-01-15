@@ -11,25 +11,18 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# Copy go.work and all module files
-COPY go.work ./
-COPY api/go.mod ./api/
-COPY agent/go.mod ./agent/
-COPY shared/go.mod ./shared/
-
-# Copy go.sum files
-COPY agent/go.sum ./agent/
+# Copy go.mod and go.sum
+COPY go.mod go.sum ./
 
 # Download dependencies
-RUN cd agent && go mod download
+RUN go mod download
 
-# Copy source code for all modules
-COPY api/ ./api/
-COPY agent/ ./agent/
-COPY shared/ ./shared/
+# Copy source code
+COPY cmd/ ./cmd/
+COPY pkg/ ./pkg/
 
 # Build
-RUN cd agent && CGO_ENABLED=0 GOOS=linux go build -o /agent .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /agent ./cmd/agent
 
 # Runtime stage - use manticore image as base
 FROM manticoresearch/manticore:latest
@@ -41,7 +34,7 @@ RUN apt-get update && apt-get install -y default-mysql-client && rm -rf /var/lib
 COPY --from=csv-builder /csv-to-manticore /usr/local/bin/csv-to-manticore
 
 # Copy agent binary
-COPY --from=builder /pkg/api/agent /usr/local/bin/agent
+COPY --from=builder /agent /usr/local/bin/agent
 
 # Default environment
 ENV MYSQL_HOST=127.0.0.1

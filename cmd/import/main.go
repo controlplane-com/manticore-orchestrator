@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cuppojoe/csv-to-manticore/pkg/config"
-	"github.com/cuppojoe/csv-to-manticore/pkg/generator"
-	"github.com/cuppojoe/csv-to-manticore/pkg/parser"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/generator"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/parser"
 )
 
 const version = "1.0.0"

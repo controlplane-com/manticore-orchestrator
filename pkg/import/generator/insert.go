@@ -3,7 +3,7 @@ package generator
 import (
 	"strings"
 
-	"github.com/cuppojoe/csv-to-manticore/pkg/config"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
 )
 
 // InsertGenerator generates SQL INSERT statements with optional batching.

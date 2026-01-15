@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 func TestCalculateBackoffWithJitter(t *testing.T) {

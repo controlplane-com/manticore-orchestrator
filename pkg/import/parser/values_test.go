@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cuppojoe/csv-to-manticore/pkg/config"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
 )
 
 func TestConvertRow(t *testing.T) {

@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/shared/schema"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/schema"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 // AgentClient is an HTTP client for the Manticore agent

@@ -30,6 +30,7 @@ state.json
 
 # Claude AI
 .claude/settings.local.json
+.claude
 
 # Test data
 *.csv

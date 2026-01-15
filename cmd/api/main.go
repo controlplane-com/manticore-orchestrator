@@ -13,11 +13,11 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/actions"
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
-	"github.com/controlplane-com/manticore-orchestrator/shared/cluster"
-	"github.com/controlplane-com/manticore-orchestrator/shared/cpln"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	actions2 "github.com/controlplane-com/manticore-orchestrator/pkg/api/actions"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cluster"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cpln"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 // Config holds the orchestrator configuration
@@ -508,7 +508,7 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tablesConfig {
 		tableNames = append(tableNames, t.Name)
 	}
-	tableSlots := actions.DiscoverTableSlots(clients, tableNames)
+	tableSlots := actions2.DiscoverTableSlots(clients, tableNames)
 
 	// Fetch tables from each replica concurrently
 	type replicaTables struct {
@@ -661,11 +661,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	clients := s.buildClients(replicaCount)
 
-	ctx := &actions.Context{
+	ctx := &actions2.Context{
 		Clients: clients,
 	}
 
-	if err := actions.Health(ctx); err != nil {
+	if err := actions2.Health(ctx); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -794,15 +794,15 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert TableConfig to actions.TableConfig
-	actionTables := make([]actions.TableConfig, len(tables))
+	actionTables := make([]actions2.TableConfig, len(tables))
 	for i, t := range tables {
-		actionTables[i] = actions.TableConfig{Name: t.Name, CsvPath: t.CsvPath}
+		actionTables[i] = actions2.TableConfig{Name: t.Name, CsvPath: t.CsvPath}
 	}
 
 	// Convert grastate to CallerInfo
-	var callerInfo *actions.CallerInfo
+	var callerInfo *actions2.CallerInfo
 	if req.Grastate != nil {
-		callerInfo = &actions.CallerInfo{
+		callerInfo = &actions2.CallerInfo{
 			UUID:            req.Grastate.UUID,
 			Seqno:           req.Grastate.Seqno,
 			SafeToBootstrap: req.Grastate.SafeToBootstrap,
@@ -821,7 +821,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("init requested", "replicaIndex", req.ReplicaIndex, "tables", len(tables), "hasGrastate", callerInfo != nil, "aliveSinceStart", req.AliveSinceStart, "clusterStatus", req.ClusterStatus, "nodeState", req.NodeState)
-	result, err := actions.Init(r.Context(), clientBuilder, replicaCountFetcher, actionTables, req.ReplicaIndex, callerInfo, req.AliveSinceStart, s.config.BootstrapTimeout)
+	result, err := actions2.Init(r.Context(), clientBuilder, replicaCountFetcher, actionTables, req.ReplicaIndex, callerInfo, req.AliveSinceStart, s.config.BootstrapTimeout)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1274,7 +1274,7 @@ func runCLI(config Config) {
 
 	clients := buildClientsStatic(config, replicaCount)
 
-	ctx := &actions.Context{
+	ctx := &actions2.Context{
 		Clients: clients,
 		Dataset: tableName,
 		CSVPath: csvPath,
@@ -1283,7 +1283,7 @@ func runCLI(config Config) {
 	var actionErr error
 	switch action {
 	case "health":
-		actionErr = actions.Health(ctx)
+		actionErr = actions2.Health(ctx)
 
 	case "init":
 		// Get ALL tables from TABLES_CONFIG (like HTTP mode)
@@ -1296,9 +1296,9 @@ func runCLI(config Config) {
 			slog.Error("no tables configured in TABLES_CONFIG")
 			os.Exit(1)
 		}
-		actionTables := make([]actions.TableConfig, len(tables))
+		actionTables := make([]actions2.TableConfig, len(tables))
 		for i, t := range tables {
-			actionTables[i] = actions.TableConfig{Name: t.Name, CsvPath: t.CsvPath}
+			actionTables[i] = actions2.TableConfig{Name: t.Name, CsvPath: t.CsvPath}
 		}
 		clientBuilder := func(count int) []*client.AgentClient {
 			return buildClientsStatic(config, count)
@@ -1307,19 +1307,19 @@ func runCLI(config Config) {
 			return replicaCount, nil // Static for CLI mode
 		}
 		// For CLI mode, use a high aliveSinceStart to allow immediate bootstrap if needed
-		_, actionErr = actions.Init(goCtx, clientBuilder, replicaCountFetcher, actionTables, replicaIndex, nil, 999999, 60)
+		_, actionErr = actions2.Init(goCtx, clientBuilder, replicaCountFetcher, actionTables, replicaIndex, nil, 999999, 60)
 
 	case "import":
 		// Pass context for graceful shutdown - cleanup runs automatically on cancellation
-		actionErr = actions.Import(goCtx, ctx)
+		actionErr = actions2.Import(goCtx, ctx)
 
 	case "repair":
 		if repairSourceReplica >= 0 {
 			slog.Debug("using explicit source replica for repair", "sourceReplica", repairSourceReplica)
-			actionErr = actions.RepairWithSource(ctx, repairSourceReplica)
+			actionErr = actions2.RepairWithSource(ctx, repairSourceReplica)
 		} else {
 			slog.Debug("using intelligent source selection")
-			actionErr = actions.Repair(ctx)
+			actionErr = actions2.Repair(ctx)
 		}
 
 	case "config":
@@ -1506,7 +1506,7 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 	for _, t := range tablesConfig {
 		tableNames = append(tableNames, t.Name)
 	}
-	tableSlots := actions.DiscoverTableSlots(clients, tableNames)
+	tableSlots := actions2.DiscoverTableSlots(clients, tableNames)
 
 	// Fetch tables from each replica
 	type replicaTables struct {

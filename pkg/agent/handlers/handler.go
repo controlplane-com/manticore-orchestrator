@@ -11,18 +11,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/pkg/api/agent/jobs"
-	manticore2 "github.com/controlplane-com/manticore-orchestrator/pkg/api/agent/manticore"
-	"github.com/controlplane-com/manticore-orchestrator/shared/schema"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/jobs"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/manticore"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/schema"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 	"github.com/gorilla/mux"
 )
 
 type Handler struct {
-	client        *manticore2.Client
-	registry      *manticore2.SchemaRegistry
+	client        *manticore.Client
+	registry      *manticore.SchemaRegistry
 	clusterName   string
 	s3Mount       string
 	batchSize     int           // Batch size for csv-to-manticore imports
@@ -30,7 +29,7 @@ type Handler struct {
 	jobManager    *jobs.Manager // Job manager for async imports
 }
 
-func NewHandler(client *manticore2.Client, registry *manticore2.SchemaRegistry, clusterName, s3Mount string, batchSize, importWorkers int, jobManager *jobs.Manager) *Handler {
+func NewHandler(client *manticore.Client, registry *manticore.SchemaRegistry, clusterName, s3Mount string, batchSize, importWorkers int, jobManager *jobs.Manager) *Handler {
 	return &Handler{
 		client:        client,
 		registry:      registry,
@@ -310,7 +309,7 @@ func (h *Handler) CreateTable(tableName string) error {
 	// Look up schema by base table name (addresses_main_a -> addresses)
 	schema, ok := h.registry.GetForDerivedTable(tableName)
 	if !ok {
-		baseName := manticore2.ExtractBaseTableName(tableName)
+		baseName := manticore.ExtractBaseTableName(tableName)
 		return fmt.Errorf("no schema found for table %s (base: %s)", tableName, baseName)
 	}
 
@@ -349,7 +348,7 @@ func (h *Handler) CreateTableHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Validate schema exists before calling internal method (return 400 for user errors)
 	if _, ok := h.registry.GetForDerivedTable(req.Table); !ok {
-		baseName := manticore2.ExtractBaseTableName(req.Table)
+		baseName := manticore.ExtractBaseTableName(req.Table)
 		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("no schema found for table %s (base: %s)", req.Table, baseName))
 		return
 	}
@@ -715,7 +714,7 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 	// Validate schema exists
 	tableSchema, ok := h.registry.GetForDerivedTable(req.Table)
 	if !ok {
-		baseName := manticore2.ExtractBaseTableName(req.Table)
+		baseName := manticore.ExtractBaseTableName(req.Table)
 		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("no schema found for table %s (base: %s)", req.Table, baseName))
 		return
 	}
@@ -766,7 +765,7 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 }
 
 // executeImportJob runs the import using a worker pool
-func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tableSchema *manticore2.Schema) {
+func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tableSchema *manticore.Schema) {
 	slog.Info("starting import job", "jobId", job.ID, "table", job.Table, "csv", csvFullPath,
 		"workers", job.Workers, "batchSize", job.BatchSize, "resumeFrom", job.LastLineNum)
 
@@ -784,19 +783,17 @@ func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tab
 	}
 
 	// Check if CSV has a header row
-	hasHeader, err := manticore2.CSVHasHeader(csvFullPath)
+	hasHeader, err := manticore.CSVHasHeader(csvFullPath)
 	if err != nil {
 		h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusFailed,
 			fmt.Sprintf("failed to check CSV header: %v", err))
 		return
 	}
 
-	// Build table name with cluster prefix for bulk API
-	clusterTable := fmt.Sprintf("%s:%s", h.clusterName, job.Table)
-
-	// Create worker pool
+	// Create worker pool with checkpoint callback for persistence
 	pool := NewImportWorkerPool(ctx, ImportOptions{
-		Table:        clusterTable,
+		Table:        job.Table,
+		Cluster:      h.clusterName,
 		Columns:      convertColumns(tableSchema.Columns),
 		BatchSize:    job.BatchSize,
 		WorkerCount:  job.Workers,
@@ -804,34 +801,17 @@ func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tab
 		HTTPPort:     h.client.HTTPPort(),
 		ErrorLogPath: h.jobManager.ErrorLogPath(job.ID),
 		SkipHeader:   hasHeader,
-	})
-
-	// Start periodic checkpoint persistence (every 30 seconds)
-	checkpointTicker := time.NewTicker(30 * time.Second)
-	checkpointDone := make(chan struct{})
-	go func() {
-		defer close(checkpointDone)
-		for {
-			select {
-			case <-checkpointTicker.C:
-				processed, failed, lastLine := pool.Progress()
-				job.ProcessedLines = processed
-				job.FailedLines = failed
-				job.LastLineNum = lastLine
-				if err := h.jobManager.UpdateJob(job); err != nil {
-					slog.Warn("failed to persist checkpoint", "jobId", job.ID, "error", err)
-				} else {
-					slog.Debug("checkpoint persisted", "jobId", job.ID, "lastLineNum", lastLine)
-				}
-			case <-ctx.Done():
-				return
+		OnCheckpoint: func(processed, failed, lastLine int64) {
+			job.ProcessedLines = processed
+			job.FailedLines = failed
+			job.LastLineNum = lastLine
+			if err := h.jobManager.UpdateJob(job); err != nil {
+				slog.Warn("failed to persist checkpoint", "jobId", job.ID, "error", err)
+			} else {
+				slog.Debug("checkpoint persisted", "jobId", job.ID, "lastLineNum", lastLine)
 			}
-		}
-	}()
-	defer func() {
-		checkpointTicker.Stop()
-		<-checkpointDone
-	}()
+		},
+	})
 
 	// Run import
 	runErr := pool.Run(csvFullPath, job.LastLineNum)

@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
-	"github.com/controlplane-com/manticore-orchestrator/shared/cluster"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cluster"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 // ClientBuilder builds clients for a given replica count

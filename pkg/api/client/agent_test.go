@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 func TestNewAgentClient(t *testing.T) {
@@ -396,7 +396,7 @@ func TestAgentClient_StartImport(t *testing.T) {
 	defer server.Close()
 
 	client := NewAgentClient(server.URL, "token")
-	jobID, err := client.StartImport("products", "/data/products.csv", 0)
+	jobID, err := client.StartImport("products", "/data/products.csv", 0, false)
 
 	if err != nil {
 		t.Fatalf("StartImport() error: %v", err)

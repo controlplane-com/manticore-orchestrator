@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/controlplane-com/manticore-orchestrator/pkg/api/agent/manticore"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/manticore"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 func TestParseGrastate(t *testing.T) {

@@ -24,17 +24,17 @@ help: ## Show this help
 # Build targets
 build-api: ## Build API (orchestrator) image
 	@echo "Building $(API_IMAGE):$(VERSION)"
-	docker build -f ./api/Dockerfile -t $(API_IMAGE):$(VERSION) .
+	docker build -f ./build/api/Dockerfile -t $(API_IMAGE):$(VERSION) .
 	@echo "Built $(API_IMAGE):$(VERSION)"
 
 build-agent: ## Build agent image
 	@echo "Building $(AGENT_IMAGE):$(VERSION)"
-	docker build -f ./agent/Dockerfile -t $(AGENT_IMAGE):$(VERSION) .
+	docker build -f ./build/agent/Dockerfile -t $(AGENT_IMAGE):$(VERSION) .
 	@echo "Built $(AGENT_IMAGE):$(VERSION)"
 
 build-ui: ## Build UI image
 	@echo "Building $(UI_IMAGE):$(VERSION)"
-	docker build -t $(UI_IMAGE):$(VERSION) ./ui
+	docker build -f ./build/ui/Dockerfile -t $(UI_IMAGE):$(VERSION) ./ui
 	@echo "Built $(UI_IMAGE):$(VERSION)"
 
 build-all: build-api build-agent build-ui ## Build all images
@@ -74,10 +74,10 @@ dev-ui-server: ## Run UI with Express proxy (for API testing)
 	cd ui && ORCHESTRATOR_API_URL=http://localhost:8080 pnpm dev:server
 
 dev-api: ## Run API in server mode
-	cd api && MODE=server go run .
+	MODE=server go run ./cmd/api
 
 dev-agent: ## Run agent locally
-	cd agent && go run .
+	go run ./cmd/agent
 
 # Clean
 clean: ## Remove built artifacts

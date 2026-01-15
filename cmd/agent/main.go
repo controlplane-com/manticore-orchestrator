@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/agent/handlers"
-	"github.com/controlplane-com/manticore-orchestrator/agent/jobs"
-	"github.com/controlplane-com/manticore-orchestrator/agent/manticore"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/handlers"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/jobs"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/manticore"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 	"github.com/gorilla/mux"
 )
 

@@ -4,13 +4,15 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/cuppojoe/csv-to-manticore/pkg/config"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
 )
 
 // BulkGenerator generates NDJSON for Manticore's bulk HTTP API.
 // Each row is formatted as: {"insert":{"index":"table","id":123,"doc":{...}}}
+// When cluster is set, adds: {"insert":{"cluster":"name","index":"table",...}}
 type BulkGenerator struct {
 	table     string
+	cluster   string
 	columns   []config.Column
 	batchSize int
 	buffer    strings.Builder
@@ -20,13 +22,15 @@ type BulkGenerator struct {
 // NewBulkGenerator creates a new NDJSON bulk generator.
 // If batchSize is 1 or less, each row produces its own NDJSON batch.
 // If batchSize is greater than 1, rows are accumulated before returning.
-func NewBulkGenerator(table string, columns []config.Column, batchSize int) *BulkGenerator {
+// The cluster parameter is optional; if non-empty, each insert will include "cluster" in the JSON.
+func NewBulkGenerator(table, cluster string, columns []config.Column, batchSize int) *BulkGenerator {
 	if batchSize < 1 {
 		batchSize = 1
 	}
 
 	return &BulkGenerator{
 		table:     table,
+		cluster:   cluster,
 		columns:   columns,
 		batchSize: batchSize,
 	}
@@ -43,13 +47,15 @@ func (g *BulkGenerator) AddRow(id int64, values []interface{}) string {
 		}
 	}
 
-	row := map[string]interface{}{
-		"insert": map[string]interface{}{
-			"index": g.table,
-			"id":    id,
-			"doc":   doc,
-		},
+	insert := map[string]interface{}{
+		"index": g.table,
+		"id":    id,
+		"doc":   doc,
 	}
+	if g.cluster != "" {
+		insert["cluster"] = g.cluster
+	}
+	row := map[string]interface{}{"insert": insert}
 
 	jsonBytes, err := json.Marshal(row)
 	if err != nil {

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
-	"github.com/controlplane-com/manticore-orchestrator/shared/types"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
 // mockImportServer creates a test server that simulates agent responses for import operations

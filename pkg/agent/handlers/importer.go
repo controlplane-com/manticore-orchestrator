@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -13,11 +15,52 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/pkg/api/agent/manticore"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/manticore"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/import/generator"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/import/parser"
 )
+
+// Retry configuration for bulk API requests
+const (
+	bulkMaxRetries     = 5
+	bulkBaseDelay      = 500 * time.Millisecond
+	bulkMaxDelay       = 10 * time.Second
+	bulkJitterFraction = 0.3
+)
+
+// Chunk configuration for progress tracking
+const (
+	// Number of full worker batches to send before updating progress checkpoint
+	importChunkMultiplier = 2
+)
+
+// isRetryableError returns true if the error is a transient network error that should be retried
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "broken pipe")
+}
+
+// calculateBulkBackoff returns exponential backoff delay with jitter for bulk retries
+func calculateBulkBackoff(attempt int) time.Duration {
+	backoff := float64(bulkBaseDelay) * math.Pow(2, float64(attempt-1))
+	if backoff > float64(bulkMaxDelay) {
+		backoff = float64(bulkMaxDelay)
+	}
+	jitter := backoff * bulkJitterFraction * (2*rand.Float64() - 1)
+	delay := time.Duration(backoff + jitter)
+	if delay < bulkBaseDelay {
+		delay = bulkBaseDelay
+	}
+	return delay
+}
 
 // convertColumns converts manticore.Column slice to config.Column slice
 func convertColumns(cols []manticore.Column) []config.Column {
@@ -31,9 +74,14 @@ func convertColumns(cols []manticore.Column) []config.Column {
 	return result
 }
 
+// CheckpointCallback is called when the producer updates the progress checkpoint.
+// Parameters are: processedLines, failedLines, lastLineNum
+type CheckpointCallback func(processed, failed, lastLine int64)
+
 // ImportOptions configures the worker pool for a CSV import
 type ImportOptions struct {
 	Table        string
+	Cluster      string // Cluster name for bulk API (optional)
 	Columns      []config.Column
 	BatchSize    int
 	WorkerCount  int
@@ -41,6 +89,7 @@ type ImportOptions struct {
 	HTTPPort     string // HTTP API port for bulk endpoint
 	ErrorLogPath string
 	SkipHeader   bool
+	OnCheckpoint CheckpointCallback // Called when progress checkpoint is updated (optional)
 }
 
 // csvRecord represents a parsed CSV row with its line number
@@ -52,6 +101,7 @@ type csvRecord struct {
 // ImportWorkerPool manages parallel CSV import with multiple worker goroutines
 type ImportWorkerPool struct {
 	table       string
+	cluster     string
 	columns     []config.Column
 	batchSize   int
 	workerCount int
@@ -66,6 +116,10 @@ type ImportWorkerPool struct {
 	processedLines int64
 	failedLines    int64
 	lastLineNum    int64
+
+	// Chunk-based progress tracking
+	chunkProcessed int64              // Records processed in current chunk (atomic)
+	onCheckpoint   CheckpointCallback // Called when checkpoint is updated
 
 	// Error logging
 	errorLogPath string
@@ -89,6 +143,7 @@ func NewImportWorkerPool(ctx context.Context, opts ImportOptions) *ImportWorkerP
 
 	return &ImportWorkerPool{
 		table:        opts.Table,
+		cluster:      opts.Cluster,
 		columns:      opts.Columns,
 		batchSize:    opts.BatchSize,
 		workerCount:  opts.WorkerCount,
@@ -96,6 +151,7 @@ func NewImportWorkerPool(ctx context.Context, opts ImportOptions) *ImportWorkerP
 		httpPort:     opts.HTTPPort,
 		skipHeader:   opts.SkipHeader,
 		errorLogPath: opts.ErrorLogPath,
+		onCheckpoint: opts.OnCheckpoint,
 		records:      make(chan csvRecord, opts.WorkerCount*opts.BatchSize),
 		ctx:          poolCtx,
 		cancel:       cancel,
@@ -169,6 +225,7 @@ func (p *ImportWorkerPool) Progress() (processed, failed, lastLine int64) {
 }
 
 // producer reads the CSV file and sends records to the channel
+// It manages progress checkpoints by waiting for chunks to be fully processed
 func (p *ImportWorkerPool) producer(csvPath string, startLine int64) error {
 	f, err := os.Open(csvPath)
 	if err != nil {
@@ -186,6 +243,11 @@ func (p *ImportWorkerPool) producer(csvPath string, startLine int64) error {
 	if err != nil {
 		return fmt.Errorf("failed to create CSV processor: %w", err)
 	}
+
+	// Calculate chunk size for progress tracking
+	chunkSize := p.batchSize * p.workerCount * importChunkMultiplier
+	recordsInChunk := 0
+	lastLineInChunk := int64(0)
 
 	// Read and dispatch records
 	for {
@@ -216,6 +278,48 @@ func (p *ImportWorkerPool) producer(csvPath string, startLine int64) error {
 			return p.ctx.Err()
 		case p.records <- csvRecord{record: record, lineNum: lineNum}:
 		}
+
+		recordsInChunk++
+		lastLineInChunk = int64(lineNum)
+
+		// Check if chunk is complete
+		if recordsInChunk >= chunkSize {
+			// Wait for workers to finish processing this chunk
+			p.waitForChunkCompletion(recordsInChunk)
+
+			// Safe to update checkpoint - all records in chunk have been processed
+			atomic.StoreInt64(&p.lastLineNum, lastLineInChunk)
+			slog.Debug("checkpoint updated", "line", lastLineInChunk, "chunkSize", chunkSize)
+
+			// Notify callback if set
+			if p.onCheckpoint != nil {
+				p.onCheckpoint(
+					atomic.LoadInt64(&p.processedLines),
+					atomic.LoadInt64(&p.failedLines),
+					lastLineInChunk,
+				)
+			}
+
+			// Reset for next chunk
+			atomic.StoreInt64(&p.chunkProcessed, 0)
+			recordsInChunk = 0
+		}
+	}
+
+	// Handle final partial chunk
+	if recordsInChunk > 0 {
+		p.waitForChunkCompletion(recordsInChunk)
+		atomic.StoreInt64(&p.lastLineNum, lastLineInChunk)
+		slog.Debug("final checkpoint updated", "line", lastLineInChunk, "recordsInChunk", recordsInChunk)
+
+		// Notify callback if set
+		if p.onCheckpoint != nil {
+			p.onCheckpoint(
+				atomic.LoadInt64(&p.processedLines),
+				atomic.LoadInt64(&p.failedLines),
+				lastLineInChunk,
+			)
+		}
 	}
 
 	return nil
@@ -229,7 +333,7 @@ func (p *ImportWorkerPool) worker(id int) {
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 
 	// Create Bulk generator for this worker
-	gen := generator.NewBulkGenerator(p.table, p.columns, p.batchSize)
+	gen := generator.NewBulkGenerator(p.table, p.cluster, p.columns, p.batchSize)
 
 	for {
 		select {
@@ -273,42 +377,75 @@ func (p *ImportWorkerPool) worker(id int) {
 			}
 
 			atomic.AddInt64(&p.processedLines, 1)
-			// Update last line number (checkpoint)
-			for {
-				old := atomic.LoadInt64(&p.lastLineNum)
-				if int64(rec.lineNum) <= old {
-					break
-				}
-				if atomic.CompareAndSwapInt64(&p.lastLineNum, old, int64(rec.lineNum)) {
-					break
-				}
-			}
+			// Signal chunk completion to producer
+			atomic.AddInt64(&p.chunkProcessed, 1)
 		}
 	}
 }
 
-// executeBulk sends NDJSON to Manticore's bulk API
+// waitForChunkCompletion polls until all records in the chunk have been processed by workers
+func (p *ImportWorkerPool) waitForChunkCompletion(expected int) {
+	for {
+		if atomic.LoadInt64(&p.chunkProcessed) >= int64(expected) {
+			return
+		}
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// executeBulk sends NDJSON to Manticore's bulk API with retry logic for transient errors
 func (p *ImportWorkerPool) executeBulk(client *http.Client, ndjson string) error {
 	url := fmt.Sprintf("http://%s:%s/bulk", p.mysqlHost, p.httpPort)
 
-	req, err := http.NewRequestWithContext(p.ctx, "POST", url, bytes.NewBufferString(ndjson))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-ndjson")
+	var lastErr error
+	for attempt := 1; attempt <= bulkMaxRetries; attempt++ {
+		// Check for cancellation before each attempt
+		select {
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		default:
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("bulk request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequestWithContext(p.ctx, "POST", url, bytes.NewBufferString(ndjson))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/x-ndjson")
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("bulk insert failed: %s - %s", resp.Status, string(body))
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("bulk request failed: %w", err)
+			if isRetryableError(err) && attempt < bulkMaxRetries {
+				delay := calculateBulkBackoff(attempt)
+				slog.Warn("bulk request failed, retrying",
+					"attempt", attempt,
+					"maxRetries", bulkMaxRetries,
+					"delay", delay,
+					"error", err)
+				select {
+				case <-p.ctx.Done():
+					return p.ctx.Err()
+				case <-time.After(delay):
+				}
+				continue
+			}
+			return lastErr
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("bulk insert failed: %s - %s", resp.Status, string(body))
+		}
+
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("bulk request failed after %d retries: %w", bulkMaxRetries, lastErr)
 }
 
 // recordError logs an error to the error log file

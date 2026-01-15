@@ -3,7 +3,7 @@ package actions
 import (
 	"log/slog"
 
-	"github.com/controlplane-com/manticore-orchestrator/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 )
 
 // Context holds the execution context for actions

@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"github.com/cuppojoe/csv-to-manticore/pkg/config"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
 )
 
 func TestNewInsertGenerator(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cuppojoe/csv-to-manticore/pkg/config"
-	"github.com/cuppojoe/csv-to-manticore/pkg/generator"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/config"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/import/generator"
 )
 
 // ParseError represents an error that occurred while parsing a specific column.

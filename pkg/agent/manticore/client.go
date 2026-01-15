@@ -9,9 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/schema"
 	_ "github.com/go-sql-driver/mysql"
-
-	"github.com/controlplane-com/manticore-orchestrator/shared/schema"
 )
 
 // Client wraps a MySQL connection and HTTP client to Manticore
