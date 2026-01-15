@@ -1,0 +1,157 @@
+// API response types for the Manticore orchestrator
+
+export interface ApiResponse {
+  status: string;
+  message?: string;
+  error?: string;
+}
+
+export interface HealthResponse extends ApiResponse {
+  // Add health-specific fields as needed
+}
+
+export interface ActionRequest {
+  tableName?: string;
+  forceOverride?: boolean;
+  sourceReplica?: number;
+}
+
+export interface ImportRequest {
+  tableName: string;
+}
+
+export interface RepairRequest {
+  forceOverride?: boolean;
+  sourceReplica?: number;
+}
+
+// Table configuration from TABLES_CONFIG
+export interface TableConfig {
+  name: string;
+  csvPath: string;
+}
+
+// Config response from /api/config
+export interface ConfigResponse {
+  replicaCount: number;
+  workloadName: string;
+  gvc: string;
+  location: string;
+  tables: TableConfig[];
+}
+
+// Replica status from /api/cluster
+export interface ReplicaStatus {
+  index: number;
+  endpoint: string;
+  status: 'online' | 'offline' | 'error' | 'not_in_use';
+  clusterStatus: string | null;
+  nodeState: string | null;
+  error: string | null;
+}
+
+// Cluster response from /api/cluster
+export interface ClusterResponse {
+  status: 'healthy' | 'degraded' | 'uninitialized';
+  replicas: ReplicaStatus[];
+}
+
+// Cluster group for split-brain detection
+export interface ClusterGroup {
+  uuid: string;
+  replicas: number[];
+  nodeCount: number;
+}
+
+// Cluster discovery response from /api/cluster/discover
+export interface ClusterDiscoveryResponse {
+  cluster: {
+    uuid: string;
+    sourceAddr: string;
+    sourceIdx: number;
+    nodeCount: number;
+  } | null;
+  splitBrain: boolean;
+  groups?: ClusterGroup[];
+}
+
+// Table component status (main, delta, distributed)
+export interface TableComponentStatus {
+  present: boolean;
+  inCluster: boolean;
+}
+
+// Per-replica table status
+export interface TableReplicaStatus {
+  index: number;
+  online: boolean;
+  mainTable: TableComponentStatus;
+  deltaTable: TableComponentStatus;
+  distributedTable: TableComponentStatus;
+  error?: string;
+}
+
+// Table status entry from /api/tables/status
+export interface TableStatusEntry {
+  name: string;
+  csvPath: string;
+  replicas: TableReplicaStatus[];
+}
+
+// Tables status response from /api/tables/status
+export interface TablesStatusResponse {
+  tableSlots: Record<string, string>;
+  tables: TableStatusEntry[];
+}
+
+// Column schema from DESCRIBE command
+export interface ColumnSchema {
+  field: string;
+  type: string;
+  props?: string;
+}
+
+// Table schema response from /api/tables/{name}/schema
+export interface TableSchemaResponse {
+  table: string;
+  columns: ColumnSchema[];
+}
+
+// Import status from /api/imports
+export interface ImportStatus {
+  tableName: string;
+  commandId: string;
+  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+}
+
+// Imports response from /api/imports
+export interface ImportsResponse {
+  imports: ImportStatus[];
+}
+
+// Command history entry from /api/commands
+export interface CommandHistoryEntry {
+  id: string;
+  action: 'import' | 'repair';
+  tableName?: string; // only for imports
+  sourceReplica?: number; // only for repairs
+  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+  created: string; // ISO timestamp
+}
+
+// Command history response from /api/commands
+export interface CommandHistoryResponse {
+  commands: CommandHistoryEntry[];
+}
+
+// Repair status from /api/repairs
+export interface RepairStatus {
+  commandId: string;
+  sourceReplica?: number;
+  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+}
+
+// Repairs response from /api/repairs
+export interface RepairsResponse {
+  repairs: RepairStatus[];
+}

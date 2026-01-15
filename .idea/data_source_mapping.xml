@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourcePerFileMappings">
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/49c48ae2-503e-47ca-902b-b7881011e908/console.sql" value="49c48ae2-503e-47ca-902b-b7881011e908" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/5bd7b6d2-1d08-47b2-adb5-715c694421e6/console.sql" value="5bd7b6d2-1d08-47b2-adb5-715c694421e6" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/6276a442-c7e4-463d-9f42-04cc8a64dfb8/console.sql" value="6276a442-c7e4-463d-9f42-04cc8a64dfb8" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/6276a442-c7e4-463d-9f42-04cc8a64dfb8/console_1.sql" value="6276a442-c7e4-463d-9f42-04cc8a64dfb8" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/6276a442-c7e4-463d-9f42-04cc8a64dfb8/console_2.sql" value="6276a442-c7e4-463d-9f42-04cc8a64dfb8" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/6276a442-c7e4-463d-9f42-04cc8a64dfb8/console_3.sql" value="6276a442-c7e4-463d-9f42-04cc8a64dfb8" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/93b0e17e-95b1-4b3e-98d2-c0f065bd3e53/console.sql" value="93b0e17e-95b1-4b3e-98d2-c0f065bd3e53" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/95587a69-deef-4c51-bb2e-4924d52c7b3c/console.sql" value="95587a69-deef-4c51-bb2e-4924d52c7b3c" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/95587a69-deef-4c51-bb2e-4924d52c7b3c/console_1.sql" value="95587a69-deef-4c51-bb2e-4924d52c7b3c" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/95587a69-deef-4c51-bb2e-4924d52c7b3c/console_2.sql" value="95587a69-deef-4c51-bb2e-4924d52c7b3c" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/95587a69-deef-4c51-bb2e-4924d52c7b3c/console_3.sql" value="95587a69-deef-4c51-bb2e-4924d52c7b3c" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/a3b99d59-f157-45b8-a566-d886a26878a6/console.sql" value="a3b99d59-f157-45b8-a566-d886a26878a6" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/adebd907-a5da-4b70-b776-a260424f9a89/console.sql" value="adebd907-a5da-4b70-b776-a260424f9a89" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/b07c06e0-c1cc-4724-b106-116fc465ba0d/console.sql" value="b07c06e0-c1cc-4724-b106-116fc465ba0d" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/c73e842d-277e-4b63-9401-99cdeb682350/console.sql" value="c73e842d-277e-4b63-9401-99cdeb682350" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/c73e842d-277e-4b63-9401-99cdeb682350/console_1.sql" value="c73e842d-277e-4b63-9401-99cdeb682350" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/f1d8cac2-99cb-41e9-93e3-9e198b62731b/console.sql" value="f1d8cac2-99cb-41e9-93e3-9e198b62731b" />
+  </component>
+</project>

@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 512" width="1200" height="512">
+  <defs>
+    <!-- Warm gradient: amber → orange → red -->
+    <linearGradient id="warmGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FBBF24"/>
+      <stop offset="0.5" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#EF4444"/>
+    </linearGradient>
+    
+    <!-- Gradient for the M shape -->
+    <linearGradient id="mGrad" x1="96" y1="154" x2="330" y2="396" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FBBF24"/>
+      <stop offset="0.5" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#EF4444"/>
+    </linearGradient>
+    
+    <!-- Gradient for the orbit dot -->
+    <linearGradient id="dotGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FCD34D"/>
+      <stop offset="0.6" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#DC2626"/>
+    </linearGradient>
+    
+    <!-- Gradient for the bar -->
+    <linearGradient id="barGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FBBF24"/>
+      <stop offset="0.55" stop-color="#F97316"/>
+      <stop offset="1" stop-color="#EF4444"/>
+    </linearGradient>
+    
+    <!-- Subtle glow for the M container -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Rounded container - now a subtle glowing outline instead of solid fill -->
+  <rect
+     x="28.63"
+     y="76.45"
+     width="364.08"
+     height="366.92"
+     rx="97.75"
+     fill="none"
+     stroke="url(#warmGrad)"
+     stroke-width="3"
+     opacity="0.4"/>
+  
+  <!-- Inner subtle glow rect -->
+  <rect
+     x="38"
+     y="86"
+     width="345"
+     height="348"
+     rx="90"
+     fill="url(#warmGrad)"
+     opacity="0.08"/>
+  
+  <!-- The M letterform -->
+  <path
+     d="M 96.0101,373.92604 V 174.53328 q 0,-19.72016 19.72016,-19.72016 13.14679,0 21.9113,13.14679 l 74.49839,129.2766 74.49839,-129.2766 q 8.76451,-13.14679 21.91129,-13.14679 19.72015,0 19.72015,19.72016 v 199.39276 q 0,21.91128 -21.91129,21.91128 -21.91128,0 -21.91128,-21.91128 V 259.98732 l -52.5871,92.02741 q -6.57339,10.95566 -19.72016,10.95566 -13.14677,0 -19.72016,-10.95566 l -52.5871,-92.02741 v 113.93872 q 0,21.91128 -21.9113,21.91128 -21.91129,0 -21.91129,-21.91128 z"
+     fill="url(#mGrad)"/>
+  
+  <!-- Orbit dot -->
+  <circle
+     cx="212.71"
+     cy="144.22"
+     r="29.05"
+     fill="url(#dotGrad)"/>
+  
+  <!-- Text: Manticore - light colored for dark backgrounds -->
+  <text
+     x="463.24"
+     y="224.79"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+     font-size="144.19"
+     font-weight="800"
+     letter-spacing="-1.2"
+     fill="#F5F5F5">Manticore</text>
+  
+  <!-- Gradient bar -->
+  <rect
+     x="467.75"
+     y="265.34"
+     width="473.12"
+     height="22.53"
+     rx="11.26"
+     fill="url(#barGrad)"/>
+  
+  <!-- Text: ORCHESTRATOR - slightly dimmed light color -->
+  <text
+     x="463.02"
+     y="401.14"
+     font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+     font-size="82.15"
+     font-weight="650"
+     letter-spacing="2.4"
+     fill="#E5E5E5"
+     opacity="0.85">ORCHESTRATOR</text>
+</svg>

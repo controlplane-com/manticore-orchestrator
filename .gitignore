@@ -1,0 +1,42 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Go test artifacts
+*.test
+*.out
+coverage.out
+*.prof
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application state
+*.state
+state.json
+
+# Claude AI
+.claude/settings.local.json
+
+# Test data
+*.csv
+testdata/
+
+# Docker
+*.log
+
+*/node_modules
+*/dist

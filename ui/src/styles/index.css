@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply antialiased;
+  }
+
+  /* Force scrollbar gutter to always be present to prevent layout shift when modals open */
+  html {
+    scrollbar-gutter: stable;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-cpln-cyan hover:bg-cpln-navy text-white font-semibold py-2 px-4 rounded-lg transition-colors;
+  }
+
+  .btn-secondary {
+    @apply bg-cpln-orange hover:bg-cpln-navy text-white font-semibold py-2 px-4 rounded-lg transition-colors;
+  }
+
+  /* Expandable row animation using CSS Grid trick */
+  .expand-animation {
+    display: grid;
+    transition: grid-template-rows 300ms ease-out;
+  }
+
+  .expand-animation[data-expanded="false"] {
+    grid-template-rows: 0fr;
+  }
+
+  .expand-animation[data-expanded="true"] {
+    grid-template-rows: 1fr;
+  }
+
+  /* Hide the entire row when collapsed - delay visibility until animation finishes */
+  tr.expandable-row[data-expanded="false"] {
+    visibility: collapse;
+    transition: visibility 0s 300ms;
+  }
+
+  tr.expandable-row[data-expanded="true"] {
+    visibility: visible;
+    transition: visibility 0s 0s;
+  }
+
+  /* Fix border on last collapsed row */
+  tr.expandable-row:last-child[data-expanded="false"] {
+    border: none;
+  }
+
+  .expand-animation-content {
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  /* Chevron rotation for expandable rows */
+  .chevron-expand {
+    transition: transform 200ms ease-out;
+  }
+
+  .chevron-expand[data-expanded="true"] {
+    transform: rotate(90deg);
+  }
+}
