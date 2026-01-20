@@ -121,7 +121,7 @@ const ReplicaCard = ({ replica }: { replica: ReplicaStatus }) => {
   const hasError = replica.status === 'offline' || replica.status === 'error';
 
   // Status indicator color
-  const indicatorColor = replica.status === 'online' ? 'bg-green-500'
+  const indicatorColor = replica.status === 'online' ? 'pulse-healthy'
     : isNotInUse ? 'bg-gray-400'
     : 'bg-red-500';
 
@@ -153,6 +153,12 @@ const ReplicaCard = ({ replica }: { replica: ReplicaStatus }) => {
         {replica.error && replica.status !== 'not_in_use' && (
           <div className="mt-2 p-2 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-600 dark:text-red-400">
             {replica.error}
+          </div>
+        )}
+
+        {replica.deploymentMessage && (
+          <div className="mt-2 p-2 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-700 dark:text-red-300 whitespace-pre-line">
+            {replica.deploymentMessage}
           </div>
         )}
       </div>

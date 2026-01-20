@@ -50,8 +50,8 @@ export const FormSelect = ({
 
         <div className="relative">
           <Listbox.Button className={`relative w-full pl-3 pr-10 py-2 text-left border rounded-lg focus:ring-2 focus:ring-cpln-cyan focus:border-transparent ${
-            error ? 'border-red-300' : 'border-gray-300 dark:border-gray-600'
-          } ${disabled ? 'bg-gray-50 dark:bg-gray-900 text-gray-500 dark:text-gray-400' : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'}`}>
+            error ? 'border-red-300' : 'border-gray-300 dark:border-stone-600'
+          } ${disabled ? 'bg-gray-50 dark:bg-stone-900 text-gray-500 dark:text-gray-400' : 'bg-white dark:bg-stone-800 text-gray-900 dark:text-gray-100'}`}>
             <span className="block truncate">{selectedOption?.label || placeholder}</span>
             <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
               <ChevronDownIcon className="h-5 w-5 text-gray-400" aria-hidden="true" />
@@ -67,13 +67,13 @@ export const FormSelect = ({
           >
             <Listbox.Options
               anchor="bottom start"
-              className="group z-10 max-h-60 w-[var(--button-width)] overflow-auto rounded-lg shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none bg-white dark:bg-gray-800"
+              className="group z-10 max-h-60 w-[var(--button-width)] overflow-auto rounded-lg shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none bg-white dark:bg-stone-800"
             >
               {showSearch && (
-                <div className="sticky top-0 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 p-2">
+                <div className="sticky top-0 bg-white dark:bg-stone-800 border-b border-gray-200 dark:border-stone-700 p-2">
                   <input
                     type="text"
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-cpln-cyan focus:border-transparent"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-stone-600 rounded-lg bg-white dark:bg-stone-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-cpln-cyan focus:border-transparent"
                     placeholder="Search..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
@@ -90,7 +90,7 @@ export const FormSelect = ({
                     value={option.value}
                     className={({ active }) =>
                       `relative cursor-pointer select-none py-2 pl-10 pr-4 first:group-data-[side=bottom]:rounded-t-lg last:group-data-[side=bottom]:rounded-b-lg first:group-data-[side=top]:rounded-b-lg last:group-data-[side=top]:rounded-t-lg ${
-                        active ? 'bg-cpln-cyan text-white' : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+                        active ? 'bg-cpln-cyan text-white' : 'bg-white dark:bg-stone-800 text-gray-900 dark:text-gray-100'
                       }`
                     }
                   >

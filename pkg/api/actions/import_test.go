@@ -94,6 +94,15 @@ func mockImportServer(t *testing.T, existingTables []string) *httptest.Server {
 			w.Write([]byte(`{"status":"ok"}`))
 
 		default:
+			// Handle /api/tables/{name}/config pattern for table config
+			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+				json.NewEncoder(w).Encode(client.TableConfigResponse{
+					Table:        "products",
+					ImportMethod: "bulk",
+					ClusterMain:  true,
+				})
+				return
+			}
 			// Handle /api/import/{jobId} pattern for polling
 			if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "GET" {
 				w.Write([]byte(`{"job":{"id":"test-job-123","status":"completed"}}`))
@@ -307,6 +316,15 @@ func TestImport_MultipleReplicas(t *testing.T) {
 				w.WriteHeader(http.StatusAccepted)
 				w.Write([]byte(`{"jobId":"test-job-multi"}`))
 			default:
+				// Handle /api/tables/{name}/config pattern for table config
+				if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+					json.NewEncoder(w).Encode(client.TableConfigResponse{
+						Table:        "products",
+						ImportMethod: "bulk",
+						ClusterMain:  true,
+					})
+					return
+				}
 				// Handle /api/import/{jobId} pattern for polling
 				if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "GET" {
 					w.Write([]byte(`{"job":{"id":"test-job-multi","status":"completed"}}`))
@@ -398,6 +416,15 @@ func TestImport_MainTableNames(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 			w.Write([]byte(`{"jobId":"test-job-main"}`))
 		default:
+			// Handle /api/tables/{name}/config pattern for table config
+			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+				json.NewEncoder(w).Encode(client.TableConfigResponse{
+					Table:        "mydata",
+					ImportMethod: "bulk",
+					ClusterMain:  true,
+				})
+				return
+			}
 			// Handle /api/import/{jobId} pattern for polling
 			if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "GET" {
 				w.Write([]byte(`{"job":{"id":"test-job-main","status":"completed"}}`))
@@ -568,6 +595,15 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 			json.NewEncoder(w).Encode(types.TablesResponse{Tables: tableList})
 
 		default:
+			// Handle /api/tables/{name}/config pattern for table config
+			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+				json.NewEncoder(w).Encode(client.TableConfigResponse{
+					Table:        "products",
+					ImportMethod: "bulk",
+					ClusterMain:  true,
+				})
+				return
+			}
 			// Handle /api/import/{jobId} pattern - return FAILED status
 			if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "GET" {
 				w.Write([]byte(`{"job":{"id":"test-job-fail","status":"failed","error":"simulated import failure"}}`))
@@ -712,6 +748,15 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 			json.NewEncoder(w).Encode(types.TablesResponse{Tables: tableList})
 
 		default:
+			// Handle /api/tables/{name}/config pattern for table config
+			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+				json.NewEncoder(w).Encode(client.TableConfigResponse{
+					Table:        "products",
+					ImportMethod: "bulk",
+					ClusterMain:  true,
+				})
+				return
+			}
 			// Handle DELETE /api/import/{jobId} - cancel import
 			if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "DELETE" {
 				jobID := strings.TrimPrefix(r.URL.Path, "/api/import/")
@@ -826,6 +871,15 @@ func TestImport_NoCleanupBeforeClusterAdd(t *testing.T) {
 			})
 
 		default:
+			// Handle /api/tables/{name}/config pattern for table config
+			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+				json.NewEncoder(w).Encode(client.TableConfigResponse{
+					Table:        "products",
+					ImportMethod: "bulk",
+					ClusterMain:  true,
+				})
+				return
+			}
 			w.Write([]byte(`{"status":"ok"}`))
 		}
 	}))
@@ -932,6 +986,15 @@ func TestImport_CleanupOnMultipleReplicas(t *testing.T) {
 				json.NewEncoder(w).Encode(types.TablesResponse{Tables: tableList})
 
 			default:
+				// Handle /api/tables/{name}/config pattern for table config
+				if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
+					json.NewEncoder(w).Encode(client.TableConfigResponse{
+						Table:        "products",
+						ImportMethod: "bulk",
+						ClusterMain:  true,
+					})
+					return
+				}
 				// Return failed status for import polling
 				if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "GET" {
 					w.Write([]byte(`{"job":{"id":"test-job-multi-cleanup","status":"failed","error":"simulated failure"}}`))

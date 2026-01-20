@@ -155,7 +155,14 @@ func main() {
 	api.HandleFunc("/ready", h.Ready).Methods("GET")
 	api.HandleFunc("/grastate", h.Grastate).Methods("GET")
 	api.HandleFunc("/tables", h.ListTables).Methods("GET")
-	api.PathPrefix("/tables/").HandlerFunc(h.GetTableSchema).Methods("GET")
+	// Table-specific endpoints (must be before PathPrefix to match first)
+	api.PathPrefix("/tables/").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/config") {
+			h.GetTableConfig(w, r)
+		} else {
+			h.GetTableSchema(w, r)
+		}
+	})).Methods("GET")
 
 	// Table operations
 	api.HandleFunc("/table/create", h.CreateTableHandler).Methods("POST")
@@ -377,6 +384,15 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 		otherMainTable := tableName + "_main_" + otherSlot
 		deltaTable := tableName + "_delta"
 
+		// Get schema config to determine cluster membership
+		schema, ok := registry.Get(tableName)
+		clusterMain := true // default
+		if ok {
+			clusterMain = schema.ClusterMain
+		}
+
+		slog.Debug("ensuring tables", "table", tableName, "mainTable", mainTable, "deltaTable", deltaTable, "clusterMain", clusterMain)
+
 		// Drop the other slot's main table if it exists (cleanup from previous slot switch)
 		if err := handler.DropTable(otherMainTable); err != nil {
 			return fmt.Errorf("failed to drop other slot table: %w", err)
@@ -387,7 +403,7 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 			return fmt.Errorf("failed to create delta table: %w", err)
 		}
 
-		// Add delta to cluster (idempotent - handles "already in cluster")
+		// Add delta to cluster (idempotent - handles "already in cluster") - delta is always clustered
 		if err := handler.ClusterAdd(deltaTable); err != nil {
 			return fmt.Errorf("failed to add delta to cluster: %w", err)
 		}
@@ -397,13 +413,17 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 			return fmt.Errorf("failed to create main table: %w", err)
 		}
 
-		// Add main to cluster (idempotent - handles "already in cluster")
-		if err := handler.ClusterAdd(mainTable); err != nil {
-			return fmt.Errorf("failed to add main to cluster: %w", err)
+		// Conditionally add main to cluster based on schema config
+		if clusterMain {
+			if err := handler.ClusterAdd(mainTable); err != nil {
+				return fmt.Errorf("failed to add main to cluster: %w", err)
+			}
+		} else {
+			slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", mainTable)
 		}
 
-		// Create distributed table pointing to main and delta
-		if err := handler.CreateDistributed(tableName, []string{mainTable, deltaTable}); err != nil {
+		// Create distributed table pointing to main and delta (no agents - orchestrator handles mirrors)
+		if err := handler.CreateDistributed(tableName, []string{mainTable, deltaTable}, nil, "", 0); err != nil {
 			return fmt.Errorf("failed to create distributed table: %w", err)
 		}
 	}

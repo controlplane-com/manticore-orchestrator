@@ -214,23 +214,31 @@ func (c *AgentClient) DropTable(table string, maxRetries int) error {
 	return err
 }
 
-// AlterDistributed alters a distributed table's local references
+// AlterDistributed alters a distributed table's local references and agents
 // maxRetries: 1 = no retries, 0 = use default (5)
-func (c *AgentClient) AlterDistributed(distributed string, locals []string, maxRetries int) error {
-	_, err := c.doRequest("POST", "/api/distributed/alter", map[string]interface{}{
-		"distributed": distributed,
-		"locals":      locals,
-	}, maxRetries)
+func (c *AgentClient) AlterDistributed(distributed string, locals []string, agents []string, haStrategy string, agentRetryCount int, maxRetries int) error {
+	req := types.AlterDistributedRequest{
+		Distributed:     distributed,
+		Locals:          locals,
+		Agents:          agents,
+		HAStrategy:      haStrategy,
+		AgentRetryCount: agentRetryCount,
+	}
+	_, err := c.doRequest("POST", "/api/distributed/alter", req, maxRetries)
 	return err
 }
 
-// CreateDistributed creates a distributed table
+// CreateDistributed creates a distributed table with optional agents for load balancing
 // maxRetries: 1 = no retries, 0 = use default (5)
-func (c *AgentClient) CreateDistributed(distributed string, locals []string, maxRetries int) error {
-	_, err := c.doRequest("POST", "/api/distributed/create", map[string]interface{}{
-		"distributed": distributed,
-		"locals":      locals,
-	}, maxRetries)
+func (c *AgentClient) CreateDistributed(distributed string, locals []string, agents []string, haStrategy string, agentRetryCount int, maxRetries int) error {
+	req := types.CreateDistributedRequest{
+		Distributed:     distributed,
+		Locals:          locals,
+		Agents:          agents,
+		HAStrategy:      haStrategy,
+		AgentRetryCount: agentRetryCount,
+	}
+	_, err := c.doRequest("POST", "/api/distributed/create", req, maxRetries)
 	return err
 }
 
@@ -275,9 +283,12 @@ func (c *AgentClient) ClusterRejoin(sourceAddr string, maxRetries int) error {
 
 // ImportConfig holds configuration for async import polling
 type ImportConfig struct {
-	PollInterval time.Duration
-	PollTimeout  time.Duration
-	Resume       bool
+	PollInterval      time.Duration
+	PollTimeout       time.Duration
+	Resume            bool
+	Method            types.ImportMethod // Import method (bulk or indexer)
+	MemLimit          string             // Memory limit for indexer (e.g., "2G", "4G")
+	PrebuiltIndexPath string             // Path to pre-built index on S3 mount (for indexer method)
 }
 
 // DefaultImportConfig returns default import configuration
@@ -310,16 +321,20 @@ func ImportConfigFromEnv() ImportConfig {
 		}
 	}
 
+	if method := os.Getenv("IMPORT_METHOD"); method != "" {
+		config.Method = types.ImportMethod(method)
+	}
+
+	if memLimit := os.Getenv("IMPORT_MEM_LIMIT"); memLimit != "" {
+		config.MemLimit = memLimit
+	}
+
 	return config
 }
 
 // StartImport initiates an async import and returns the job ID
-func (c *AgentClient) StartImport(table, csvPath string, maxRetries int, resume bool) (string, error) {
-	body, err := c.doRequest("POST", "/api/import", map[string]string{
-		"table":   table,
-		"csvPath": csvPath,
-		"resume":  strconv.FormatBool(resume),
-	}, maxRetries)
+func (c *AgentClient) StartImport(req types.ImportRequest, maxRetries int) (string, error) {
+	body, err := c.doRequest("POST", "/api/import", req, maxRetries)
 	if err != nil {
 		return "", err
 	}
@@ -354,24 +369,35 @@ func (c *AgentClient) CancelImport(jobID string, maxRetries int) error {
 // Import performs an async import with polling (backward compatible)
 // This replaces the old synchronous Import method
 // maxRetries: 1 = no retries, 0 = use default (5)
-func (c *AgentClient) Import(table, csvPath string, maxRetries int) error {
-	return c.ImportWithContext(context.Background(), table, csvPath, maxRetries, ImportConfigFromEnv())
+func (c *AgentClient) Import(table, csvPath, cluster string, maxRetries int) error {
+	return c.ImportWithContext(context.Background(), table, csvPath, cluster, maxRetries, ImportConfigFromEnv())
 }
 
 // ImportWithConfig performs an async import with custom polling configuration
-func (c *AgentClient) ImportWithConfig(table, csvPath string, maxRetries int, config ImportConfig) error {
-	return c.ImportWithContext(context.Background(), table, csvPath, maxRetries, config)
+func (c *AgentClient) ImportWithConfig(table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
+	return c.ImportWithContext(context.Background(), table, csvPath, cluster, maxRetries, config)
 }
 
 // ImportWithContext performs an async import with context support for cancellation
-func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath string, maxRetries int, config ImportConfig) error {
+func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
+	// Build import request from config
+	req := types.ImportRequest{
+		Table:             table,
+		CSVPath:           csvPath,
+		Cluster:           cluster,
+		Resume:            config.Resume,
+		Method:            config.Method,
+		MemLimit:          config.MemLimit,
+		PrebuiltIndexPath: config.PrebuiltIndexPath,
+	}
+
 	// Start the async import
-	jobID, err := c.StartImport(table, csvPath, maxRetries, config.Resume)
+	jobID, err := c.StartImport(req, maxRetries)
 	if err != nil {
 		return fmt.Errorf("failed to start import: %w", err)
 	}
 
-	slog.Debug("import job started", "jobId", jobID, "table", table)
+	slog.Debug("import job started", "jobId", jobID, "table", table, "method", config.Method)
 
 	// Poll for completion
 	deadline := time.Now().Add(config.PollTimeout)
@@ -428,6 +454,30 @@ func (c *AgentClient) GetTableSchema(tableName string, maxRetries int) (*schema.
 	}
 
 	var resp schema.TableSchemaResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &resp, nil
+}
+
+// TableConfigResponse represents table behavior configuration from the agent
+type TableConfigResponse struct {
+	Table           string `json:"table"`
+	ImportMethod    string `json:"importMethod"`
+	ClusterMain     bool   `json:"clusterMain"`
+	HAStrategy      string `json:"haStrategy"`
+	AgentRetryCount int    `json:"agentRetryCount"`
+}
+
+// GetTableConfig returns the behavior configuration for a table
+// maxRetries: 1 = no retries, 0 = use default (5)
+func (c *AgentClient) GetTableConfig(tableName string, maxRetries int) (*TableConfigResponse, error) {
+	body, err := c.doRequest("GET", fmt.Sprintf("/api/tables/%s/config", tableName), nil, maxRetries)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp TableConfigResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}

@@ -12,6 +12,7 @@ function classNames(...classes: string[]) {
 const navigation = [
   { id: 'dashboard', label: 'Dashboard', path: '/' },
   { id: 'tables', label: 'Tables', path: '/tables' },
+  { id: 'query', label: 'Query', path: '/query' },
   { id: 'health', label: 'Health', path: '/health' },
 ];
 

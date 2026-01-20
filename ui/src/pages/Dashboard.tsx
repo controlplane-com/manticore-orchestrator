@@ -17,8 +17,6 @@ import {
   ServerStackIcon,
   ExclamationTriangleIcon,
   ClockIcon,
-  CheckCircleIcon,
-  XCircleIcon,
 } from '@heroicons/react/24/outline';
 
 export const Dashboard = () => {
@@ -431,13 +429,9 @@ export const Dashboard = () => {
                   className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-stone-700 rounded"
                 >
                   <div className="flex items-center gap-3">
-                    {cmd.lifecycleStage === 'completed' ? (
-                      <CheckCircleIcon className="h-4 w-4 text-green-500" />
-                    ) : cmd.lifecycleStage === 'failed' ? (
-                      <XCircleIcon className="h-4 w-4 text-red-500" />
-                    ) : (
-                      <ArrowPathIcon className="h-4 w-4 text-blue-500 animate-spin" />
-                    )}
+                    <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                      {new Date(cmd.created).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z')}
+                    </span>
                     <Badge variant={cmd.action === 'import' ? 'info' : 'warning'}>
                       {cmd.action}
                     </Badge>
@@ -457,6 +451,9 @@ export const Dashboard = () => {
                         : 'info'
                     }
                   >
+                    {(cmd.lifecycleStage === 'running' || cmd.lifecycleStage === 'pending') && (
+                      <ArrowPathIcon className="h-3 w-3 mr-1 animate-spin" />
+                    )}
                     {cmd.lifecycleStage}
                   </Badge>
                 </div>

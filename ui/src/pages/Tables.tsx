@@ -24,9 +24,14 @@ const getTableHealth = (table: TableStatusEntry): 'healthy' | 'partial' | 'offli
   const onlineReplicas = table.replicas.filter(r => r.online);
   if (onlineReplicas.length === 0) return 'offline';
 
-  const allComplete = onlineReplicas.every(r =>
-    r.mainTable.present && r.deltaTable.present && r.distributedTable.present
-  );
+  const allComplete = onlineReplicas.every(r => {
+    const tablesPresent = r.mainTable.present && r.deltaTable.present && r.distributedTable.present;
+    // If main table should be clustered, check that it is
+    const mainClusterOk = !table.clusterMain || r.mainTable.inCluster;
+    // Delta should always be clustered when present
+    const deltaClusterOk = !r.deltaTable.present || r.deltaTable.inCluster;
+    return tablesPresent && mainClusterOk && deltaClusterOk;
+  });
 
   if (allComplete) return 'healthy';
 
@@ -73,7 +78,7 @@ const getTableHealthBadge = (health: string) => {
 };
 
 // Component status indicator
-const ComponentStatus = ({ present, inCluster, label }: { present: boolean; inCluster: boolean; label: string }) => {
+const ComponentStatus = ({ present, inCluster, shouldBeInCluster, label }: { present: boolean; inCluster: boolean; shouldBeInCluster: boolean; label: string }) => {
   if (!present) {
     return (
       <span className="inline-flex items-center text-gray-400">
@@ -83,7 +88,8 @@ const ComponentStatus = ({ present, inCluster, label }: { present: boolean; inCl
     );
   }
 
-  if (!inCluster && label !== 'Dist') {
+  // Only show warning if the table should be in cluster but isn't
+  if (shouldBeInCluster && !inCluster) {
     return (
       <span className="inline-flex items-center text-yellow-600">
         <ExclamationTriangleIcon className="h-4 w-4 mr-1" />
@@ -101,7 +107,7 @@ const ComponentStatus = ({ present, inCluster, label }: { present: boolean; inCl
 };
 
 // Replica row in expanded table
-const ReplicaRow = ({ replica }: { replica: TableReplicaStatus }) => {
+const ReplicaRow = ({ replica, clusterMain }: { replica: TableReplicaStatus; clusterMain: boolean }) => {
   if (!replica.online) {
     return (
       <div className="flex items-center justify-between py-2 px-4 bg-gray-100 dark:bg-stone-700 rounded text-gray-400">
@@ -115,9 +121,9 @@ const ReplicaRow = ({ replica }: { replica: TableReplicaStatus }) => {
     <div className="flex items-center justify-between py-2 px-4 bg-gray-50 dark:bg-stone-700 rounded">
       <span className="font-medium text-gray-900 dark:text-white">Replica {replica.index}</span>
       <div className="flex items-center gap-4 text-sm">
-        <ComponentStatus present={replica.mainTable.present} inCluster={replica.mainTable.inCluster} label="Main" />
-        <ComponentStatus present={replica.deltaTable.present} inCluster={replica.deltaTable.inCluster} label="Delta" />
-        <ComponentStatus present={replica.distributedTable.present} inCluster={true} label="Dist" />
+        <ComponentStatus present={replica.mainTable.present} inCluster={replica.mainTable.inCluster} shouldBeInCluster={clusterMain} label="Main" />
+        <ComponentStatus present={replica.deltaTable.present} inCluster={replica.deltaTable.inCluster} shouldBeInCluster={true} label="Delta" />
+        <ComponentStatus present={replica.distributedTable.present} inCluster={true} shouldBeInCluster={false} label="Dist" />
       </div>
     </div>
   );
@@ -149,10 +155,10 @@ const TableRow = ({ table, slot, importStatus, onViewSchema }: { table: TableSta
               <div className="flex items-center gap-2">
                 <h4 className="font-medium text-gray-900 dark:text-white">{table.name}</h4>
                 {importStatus && (
-                  <Badge variant="info">
-                    <ArrowPathIcon className="h-3 w-3 mr-1 animate-spin" />
+                  <span className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400">
+                    <ArrowPathIcon className="h-4 w-4 animate-spin" />
                     {importStatus.lifecycleStage === 'pending' ? 'Queued' : 'Importing'}
-                  </Badge>
+                  </span>
                 )}
               </div>
               <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">
@@ -189,7 +195,7 @@ const TableRow = ({ table, slot, importStatus, onViewSchema }: { table: TableSta
             Per-Replica Status
           </h5>
           {table.replicas.map((replica) => (
-            <ReplicaRow key={replica.index} replica={replica} />
+            <ReplicaRow key={replica.index} replica={replica} clusterMain={table.clusterMain} />
           ))}
 
           <div className="mt-4 pt-3 border-t border-gray-200 dark:border-stone-600">

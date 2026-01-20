@@ -394,7 +394,7 @@ func (h *Handler) DropTableHandler(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, fmt.Sprintf("table %s dropped", req.Table))
 }
 
-// AlterDistributed alters a distributed table's local references
+// AlterDistributed alters a distributed table's local references and agents
 func (h *Handler) AlterDistributed(w http.ResponseWriter, r *http.Request) {
 	var req types.AlterDistributedRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -408,11 +408,29 @@ func (h *Handler) AlterDistributed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build ALTER TABLE statement
-	var localClauses []string
+	var clauses []string
 	for _, local := range req.Locals {
-		localClauses = append(localClauses, fmt.Sprintf("local='%s'", local))
+		clauses = append(clauses, fmt.Sprintf("local='%s'", local))
 	}
-	sql := fmt.Sprintf("ALTER TABLE %s %s", req.Distributed, strings.Join(localClauses, " "))
+
+	// Add agent mirrors for EACH local table (both main and delta)
+	if len(req.Agents) > 0 {
+		mirrorList := strings.Join(req.Agents, "|")
+		for _, local := range req.Locals {
+			agentClause := fmt.Sprintf("agent='%s:%s'", mirrorList, local)
+			clauses = append(clauses, agentClause)
+		}
+
+		// Add HA options (only relevant when agents are configured)
+		if req.HAStrategy != "" {
+			clauses = append(clauses, fmt.Sprintf("ha_strategy='%s'", req.HAStrategy))
+		}
+		if req.AgentRetryCount > 0 {
+			clauses = append(clauses, fmt.Sprintf("agent_retry_count=%d", req.AgentRetryCount))
+		}
+	}
+
+	sql := fmt.Sprintf("ALTER TABLE %s %s", req.Distributed, strings.Join(clauses, " "))
 	slog.Debug("altering distributed table", "table", req.Distributed, "sql", sql)
 
 	if err := h.client.Execute(sql); err != nil {
@@ -423,11 +441,30 @@ func (h *Handler) AlterDistributed(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, fmt.Sprintf("distributed table %s altered", req.Distributed))
 }
 
-// CreateDistributed creates or updates a distributed table to point to the specified locals
-func (h *Handler) CreateDistributed(tableName string, locals []string) error {
-	var localClauses []string
+// CreateDistributed creates or updates a distributed table to point to the specified locals and agents
+func (h *Handler) CreateDistributed(tableName string, locals []string, agents []string, haStrategy string, agentRetryCount int) error {
+	var clauses []string
+
+	// Add local tables
 	for _, local := range locals {
-		localClauses = append(localClauses, fmt.Sprintf("local='%s'", local))
+		clauses = append(clauses, fmt.Sprintf("local='%s'", local))
+	}
+
+	// Add agent mirrors for EACH local table (both main and delta)
+	if len(agents) > 0 {
+		mirrorList := strings.Join(agents, "|")
+		for _, local := range locals {
+			agentClause := fmt.Sprintf("agent='%s:%s'", mirrorList, local)
+			clauses = append(clauses, agentClause)
+		}
+
+		// Add HA options (only relevant when agents are configured)
+		if haStrategy != "" {
+			clauses = append(clauses, fmt.Sprintf("ha_strategy='%s'", haStrategy))
+		}
+		if agentRetryCount > 0 {
+			clauses = append(clauses, fmt.Sprintf("agent_retry_count=%d", agentRetryCount))
+		}
 	}
 
 	// Check if table already exists
@@ -437,8 +474,8 @@ func (h *Handler) CreateDistributed(tableName string, locals []string) error {
 	}
 
 	if exists {
-		// Table exists - ALTER to ensure it points to correct locals
-		sql := fmt.Sprintf("ALTER TABLE %s %s", tableName, strings.Join(localClauses, " "))
+		// Table exists - ALTER to ensure it points to correct locals/agents
+		sql := fmt.Sprintf("ALTER TABLE %s %s", tableName, strings.Join(clauses, " "))
 		slog.Debug("altering distributed table", "table", tableName, "sql", sql)
 		if err := h.client.Execute(sql); err != nil {
 			return fmt.Errorf("failed to alter distributed table: %w", err)
@@ -447,7 +484,7 @@ func (h *Handler) CreateDistributed(tableName string, locals []string) error {
 	}
 
 	// Table doesn't exist - CREATE it
-	sql := fmt.Sprintf("CREATE TABLE %s TYPE='distributed' %s", tableName, strings.Join(localClauses, " "))
+	sql := fmt.Sprintf("CREATE TABLE %s TYPE='distributed' %s", tableName, strings.Join(clauses, " "))
 	slog.Debug("creating distributed table", "table", tableName, "sql", sql)
 
 	if err := h.client.Execute(sql); err != nil {
@@ -470,7 +507,7 @@ func (h *Handler) CreateDistributedHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := h.CreateDistributed(req.Distributed, req.Locals); err != nil {
+	if err := h.CreateDistributed(req.Distributed, req.Locals, req.Agents, req.HAStrategy, req.AgentRetryCount); err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -698,6 +735,43 @@ func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TableConfigResponse represents table behavior configuration
+type TableConfigResponse struct {
+	Table           string `json:"table"`
+	ImportMethod    string `json:"importMethod"`
+	ClusterMain     bool   `json:"clusterMain"`
+	HAStrategy      string `json:"haStrategy"`
+	AgentRetryCount int    `json:"agentRetryCount"`
+}
+
+// GetTableConfig returns behavior configuration for a table
+func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
+	// Extract table name from URL path: /api/tables/{name}/config
+	path := r.URL.Path
+	path = strings.TrimPrefix(path, "/api/tables/")
+	path = strings.TrimSuffix(path, "/config")
+	tableName := path
+
+	if tableName == "" {
+		errorResponse(w, http.StatusBadRequest, "table name is required")
+		return
+	}
+
+	schema, ok := h.registry.Get(tableName)
+	if !ok {
+		errorResponse(w, http.StatusNotFound, fmt.Sprintf("no schema found for table %s", tableName))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, TableConfigResponse{
+		Table:           tableName,
+		ImportMethod:    schema.ImportMethod,
+		ClusterMain:     schema.ClusterMain,
+		HAStrategy:      schema.HAStrategy,
+		AgentRetryCount: schema.AgentRetryCount,
+	})
+}
+
 // StartImport starts an async import job and returns immediately with a job ID
 func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 	var req types.ImportRequest
@@ -743,7 +817,7 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create job with new fields
-	job, err := h.jobManager.CreateJob(req.Table, req.CSVPath, workers, batchSize)
+	job, err := h.jobManager.CreateJob(req.Table, req.CSVPath, req.Cluster, req.Method, req.MemLimit, req.PrebuiltIndexPath, workers, batchSize)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to create job: %v", err))
 		return
@@ -754,7 +828,7 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 		existingJob := h.jobManager.FindJobByTableAndPath(req.Table, req.CSVPath)
 		if existingJob != nil && existingJob.LastLineNum > 0 {
 			job.LastLineNum = existingJob.LastLineNum
-			slog.Info("resuming import from checkpoint", "jobId", job.ID, "lastLineNum", job.LastLineNum)
+			slog.Info("resuming import from checkpoint", "jobId", job.ID, "lastLineNum", job.LastLineNum, "oldJobId", existingJob.ID)
 		}
 	}
 
@@ -764,11 +838,8 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusAccepted, types.StartImportResponse{JobID: job.ID})
 }
 
-// executeImportJob runs the import using a worker pool
+// executeImportJob dispatches to the appropriate import method
 func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tableSchema *manticore.Schema) {
-	slog.Info("starting import job", "jobId", job.ID, "table", job.Table, "csv", csvFullPath,
-		"workers", job.Workers, "batchSize", job.BatchSize, "resumeFrom", job.LastLineNum)
-
 	// Create cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -782,6 +853,21 @@ func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tab
 		return
 	}
 
+	// Dispatch based on import method
+	if job.Method == types.ImportMethodIndexer {
+		h.executeIndexerImport(ctx, job, csvFullPath, tableSchema)
+		return
+	}
+
+	// Default: bulk API import
+	h.executeBulkImport(ctx, job, csvFullPath, tableSchema)
+}
+
+// executeBulkImport runs the import using a worker pool and HTTP bulk API
+func (h *Handler) executeBulkImport(ctx context.Context, job *types.ImportJob, csvFullPath string, tableSchema *manticore.Schema) {
+	slog.Info("starting bulk import job", "jobId", job.ID, "table", job.Table, "csv", csvFullPath,
+		"cluster", job.Cluster, "workers", job.Workers, "batchSize", job.BatchSize, "resumeFrom", job.LastLineNum)
+
 	// Check if CSV has a header row
 	hasHeader, err := manticore.CSVHasHeader(csvFullPath)
 	if err != nil {
@@ -793,7 +879,7 @@ func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tab
 	// Create worker pool with checkpoint callback for persistence
 	pool := NewImportWorkerPool(ctx, ImportOptions{
 		Table:        job.Table,
-		Cluster:      h.clusterName,
+		Cluster:      job.Cluster,
 		Columns:      convertColumns(tableSchema.Columns),
 		BatchSize:    job.BatchSize,
 		WorkerCount:  job.Workers,
@@ -828,7 +914,7 @@ func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tab
 	// Check if cancelled
 	if runErr == context.Canceled {
 		h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusCancelled, "")
-		slog.Info("import job was cancelled", "jobId", job.ID, "lastLineNum", lastLine)
+		slog.Info("bulk import job was cancelled", "jobId", job.ID, "lastLineNum", lastLine)
 		return
 	}
 
@@ -841,7 +927,7 @@ func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tab
 
 	// Success
 	h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusCompleted, "")
-	slog.Info("import job completed successfully", "jobId", job.ID,
+	slog.Info("bulk import job completed successfully", "jobId", job.ID,
 		"processedLines", processed, "failedLines", failed)
 }
 

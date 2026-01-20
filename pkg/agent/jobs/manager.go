@@ -63,16 +63,20 @@ func NewManager(jobsDir string) (*Manager, error) {
 }
 
 // CreateJob creates a new pending job and persists it
-func (m *Manager) CreateJob(table, csvPath string, workers, batchSize int) (*types.ImportJob, error) {
+func (m *Manager) CreateJob(table, csvPath, cluster string, method types.ImportMethod, memLimit, prebuiltIndexPath string, workers, batchSize int) (*types.ImportJob, error) {
 	now := time.Now().Unix()
 	job := &types.ImportJob{
-		ID:        uuid.New().String(),
-		Table:     table,
-		CSVPath:   csvPath,
-		Status:    types.ImportJobStatusPending,
-		StartedAt: &now,
-		Workers:   workers,
-		BatchSize: batchSize,
+		ID:                uuid.New().String(),
+		Table:             table,
+		CSVPath:           csvPath,
+		Cluster:           cluster,
+		Method:            method,
+		MemLimit:          memLimit,
+		PrebuiltIndexPath: prebuiltIndexPath,
+		Status:            types.ImportJobStatusPending,
+		StartedAt:         &now,
+		Workers:           workers,
+		BatchSize:         batchSize,
 	}
 
 	m.mu.Lock()
@@ -88,7 +92,7 @@ func (m *Manager) CreateJob(table, csvPath string, workers, batchSize int) (*typ
 	}
 
 	slog.Info("created import job", "jobId", job.ID, "table", table, "csvPath", csvPath,
-		"workers", workers, "batchSize", batchSize)
+		"cluster", cluster, "method", method, "memLimit", memLimit, "prebuiltIndexPath", prebuiltIndexPath, "workers", workers, "batchSize", batchSize)
 	return job, nil
 }
 

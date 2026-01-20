@@ -2,22 +2,28 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	actions2 "github.com/controlplane-com/manticore-orchestrator/pkg/api/actions"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/s3"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cluster"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cpln"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 // Config holds the orchestrator configuration
@@ -33,6 +39,15 @@ type Config struct {
 	ListenAddr           string
 	BootstrapTimeout     int    // Seconds to wait before bootstrapping a lone replica
 	OrchestratorWorkload string // Name of the cron workload for triggering imports
+	ManticoreMySQLPort   string // Port for direct MySQL connections (default 9306)
+
+	// S3 configuration for indexer method
+	S3Bucket        string // S3 bucket for index uploads
+	S3Region        string // AWS region for S3
+	S3IndexPrefix   string // Path prefix for index uploads (default: "indexer-output")
+	S3Mount         string // Mount path agents use for S3 (default: "/mnt/s3")
+	IndexerWorkDir  string // Local temp directory for indexer builds (default: "/tmp/indexer")
+	IndexerMemLimit string // Memory limit for indexer (default: "2G")
 }
 
 // Server is the orchestrator REST API server
@@ -46,6 +61,47 @@ type Server struct {
 type TableConfig struct {
 	Name    string `json:"name"`
 	CsvPath string `json:"csvPath"`
+}
+
+// QueryRequest represents the request for /api/query
+type QueryRequest struct {
+	Query        string `json:"query"`
+	ReplicaIndex *int   `json:"replicaIndex,omitempty"` // nil = load balanced
+	Broadcast    bool   `json:"broadcast,omitempty"`    // query all replicas
+}
+
+// ColumnMeta represents column metadata in query results
+type ColumnMeta struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// QueryResponse represents the response for a single replica query
+type QueryResponse struct {
+	Status          string                   `json:"status"` // "ok" or "error"
+	Columns         []ColumnMeta             `json:"columns,omitempty"`
+	Rows            []map[string]interface{} `json:"rows,omitempty"`
+	RowCount        int                      `json:"rowCount,omitempty"`
+	ExecutionTimeMs int64                    `json:"executionTimeMs,omitempty"`
+	ReplicaIndex    *int                     `json:"replicaIndex,omitempty"`
+	Error           string                   `json:"error,omitempty"`
+}
+
+// ReplicaQueryResult represents the result from a single replica in broadcast mode
+type ReplicaQueryResult struct {
+	ReplicaIndex    int                      `json:"replicaIndex"`
+	Status          string                   `json:"status"` // "success" or "error"
+	Columns         []ColumnMeta             `json:"columns,omitempty"`
+	Rows            []map[string]interface{} `json:"rows,omitempty"`
+	RowCount        int                      `json:"rowCount,omitempty"`
+	ExecutionTimeMs int64                    `json:"executionTimeMs,omitempty"`
+	Error           string                   `json:"error,omitempty"`
+}
+
+// BroadcastQueryResponse represents the response for broadcast queries
+type BroadcastQueryResponse struct {
+	Status  string               `json:"status"`
+	Results []ReplicaQueryResult `json:"results"`
 }
 
 func main() {
@@ -78,6 +134,14 @@ func main() {
 		ListenAddr:           getEnv("LISTEN_ADDR", ":8080"),
 		BootstrapTimeout:     getEnvInt("BOOTSTRAP_TIMEOUT", 60),
 		OrchestratorWorkload: getEnv("ORCHESTRATOR_WORKLOAD", ""),
+		ManticoreMySQLPort:   getEnv("MANTICORE_MYSQL_PORT", "9306"),
+		// S3 configuration for indexer method
+		S3Bucket:        getEnv("S3_BUCKET", ""),
+		S3Region:        getEnv("S3_REGION", "us-east-1"),
+		S3IndexPrefix:   getEnv("S3_INDEX_PREFIX", "indexer-output"),
+		S3Mount:         getEnv("S3_MOUNT", "/mnt/s3"),
+		IndexerWorkDir:  getEnv("INDEXER_WORK_DIR", "/tmp/indexer"),
+		IndexerMemLimit: getEnv("INDEXER_MEM_LIMIT", "2G"),
 	}
 
 	if config.AuthToken == "" {
@@ -156,6 +220,7 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/imports", server.handleImports)
 	mux.HandleFunc("/api/repairs", server.handleRepairs)
 	mux.HandleFunc("/api/commands", server.handleCommands)
+	mux.HandleFunc("/api/query", server.handleQuery)
 
 	// Status endpoint (unauthenticated, for readiness probes)
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +269,9 @@ func (s *Server) getTablesConfig() ([]TableConfig, error) {
 	for name, csvPath := range configMap {
 		tables = append(tables, TableConfig{Name: name, CsvPath: csvPath})
 	}
+	sort.Slice(tables, func(i, j int) bool {
+		return tables[i].Name < tables[j].Name
+	})
 	return tables, nil
 }
 
@@ -264,12 +332,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 // ReplicaStatus represents the status of a single replica
 type ReplicaStatus struct {
-	Index         int     `json:"index"`
-	Endpoint      string  `json:"endpoint"`
-	Status        string  `json:"status"` // online, offline, not_in_use, error
-	ClusterStatus *string `json:"clusterStatus"`
-	NodeState     *string `json:"nodeState"`
-	Error         *string `json:"error"`
+	Index             int     `json:"index"`
+	Endpoint          string  `json:"endpoint"`
+	Status            string  `json:"status"` // online, offline, not_in_use, error
+	ClusterStatus     *string `json:"clusterStatus"`
+	NodeState         *string `json:"nodeState"`
+	Error             *string `json:"error"`
+	DeploymentMessage *string `json:"deploymentMessage,omitempty"`
 }
 
 // classifyReplicaError determines the status and user-friendly error message for a replica error
@@ -335,6 +404,27 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
+	// Check if we need deployment info for unhealthy replicas
+	hasUnhealthyInUse := false
+	for _, r := range replicas {
+		if r.Status != "not_in_use" && r.Status != "online" {
+			hasUnhealthyInUse = true
+			break
+		}
+		if r.Status == "online" && r.ClusterStatus != nil {
+			cs := *r.ClusterStatus
+			if cs != "primary" && cs != "synced" {
+				hasUnhealthyInUse = true
+				break
+			}
+		}
+	}
+
+	// Fetch deployment messages for unhealthy replicas
+	if hasUnhealthyInUse && s.cplnClient != nil {
+		s.enrichWithDeploymentMessages(replicas)
+	}
+
 	// Determine overall status
 	status := "uninitialized"
 	onlineCount := 0
@@ -373,6 +463,72 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// enrichWithDeploymentMessages fetches deployment info and adds messages to unhealthy replicas
+func (s *Server) enrichWithDeploymentMessages(replicas []ReplicaStatus) {
+	deployments, err := s.cplnClient.GetDeployments(s.config.GVC, s.config.WorkloadName)
+	if err != nil {
+		slog.Debug("failed to fetch deployments for health enrichment", "error", err)
+		return
+	}
+
+	// Find deployment for current location
+	var currentDeployment *cpln.Deployment
+	for i := range deployments.Items {
+		if deployments.Items[i].Name == s.config.Location {
+			currentDeployment = &deployments.Items[i]
+			break
+		}
+	}
+
+	if currentDeployment == nil {
+		return
+	}
+
+	// Match versions to replicas by index
+	for i := range replicas {
+		// Skip healthy or not-in-use replicas
+		if replicas[i].Status == "not_in_use" {
+			continue
+		}
+		if replicas[i].Status == "online" {
+			if replicas[i].ClusterStatus != nil {
+				cs := *replicas[i].ClusterStatus
+				if cs == "primary" || cs == "synced" {
+					continue
+				}
+			}
+		}
+
+		// Get version for this replica index
+		if i < len(currentDeployment.Status.Versions) {
+			version := currentDeployment.Status.Versions[i]
+			msg := buildDeploymentMessage(version)
+			if msg != "" {
+				replicas[i].DeploymentMessage = &msg
+			}
+		}
+	}
+}
+
+// buildDeploymentMessage constructs a message from deployment version info
+func buildDeploymentMessage(version cpln.DeploymentVersion) string {
+	var messages []string
+
+	// Add version-level message
+	if version.Message != "" {
+		messages = append(messages, version.Message)
+	}
+
+	// Add container-level messages
+	for _, container := range version.Containers {
+		if container.Message != "" && container.Message != version.Message {
+			messages = append(messages, container.Message)
+		}
+	}
+
+	return strings.Join(messages, "\n")
 }
 
 // ClusterDiscoverResponse represents the response for /api/cluster/discover
@@ -471,9 +627,10 @@ type TableReplicaStatus struct {
 
 // TableStatusEntry represents the status of a single table across all replicas
 type TableStatusEntry struct {
-	Name     string               `json:"name"`
-	CsvPath  string               `json:"csvPath"`
-	Replicas []TableReplicaStatus `json:"replicas"`
+	Name        string               `json:"name"`
+	CsvPath     string               `json:"csvPath"`
+	ClusterMain bool                 `json:"clusterMain"` // Whether main table should be in cluster
+	Replicas    []TableReplicaStatus `json:"replicas"`
 }
 
 // TablesStatusResponse represents the response for /api/tables/status
@@ -510,6 +667,19 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	tableSlots := actions2.DiscoverTableSlots(clients, tableNames)
 
+	// Fetch table configs to get clusterMain setting for each table
+	// Try first available replica for each table config
+	tableConfigs := make(map[string]*client.TableConfigResponse)
+	for _, t := range tablesConfig {
+		for _, c := range clients {
+			cfg, err := c.GetTableConfig(t.Name, 1)
+			if err == nil {
+				tableConfigs[t.Name] = cfg
+				break
+			}
+		}
+	}
+
 	// Fetch tables from each replica concurrently
 	type replicaTables struct {
 		index  int
@@ -540,10 +710,17 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 	// Build response for each configured table
 	var tableEntries []TableStatusEntry
 	for _, tableConfig := range tablesConfig {
+		// Default clusterMain to true if we couldn't fetch config
+		clusterMain := true
+		if cfg, ok := tableConfigs[tableConfig.Name]; ok {
+			clusterMain = cfg.ClusterMain
+		}
+
 		entry := TableStatusEntry{
-			Name:     tableConfig.Name,
-			CsvPath:  tableConfig.CsvPath,
-			Replicas: make([]TableReplicaStatus, replicaCount),
+			Name:        tableConfig.Name,
+			CsvPath:     tableConfig.CsvPath,
+			ClusterMain: clusterMain,
+			Replicas:    make([]TableReplicaStatus, replicaCount),
 		}
 
 		// Look up the active slot for this specific table (default to "a")
@@ -1274,10 +1451,30 @@ func runCLI(config Config) {
 
 	clients := buildClientsStatic(config, replicaCount)
 
+	// Initialize S3 client and indexer builder if S3 bucket is configured (for indexer method)
+	var s3Client *s3.Client
+	var indexerBuilder *indexer.IndexBuilder
+	if config.S3Bucket != "" {
+		var err error
+		s3Client, err = s3.NewClient(config.S3Bucket, config.S3Region)
+		if err != nil {
+			slog.Warn("failed to create S3 client - indexer method will not work", "error", err)
+		} else {
+			indexerBuilder = indexer.NewIndexBuilder(config.IndexerWorkDir)
+			slog.Debug("S3 client and indexer builder initialized", "bucket", config.S3Bucket, "workDir", config.IndexerWorkDir)
+		}
+	}
+
 	ctx := &actions2.Context{
-		Clients: clients,
-		Dataset: tableName,
-		CSVPath: csvPath,
+		Clients:        clients,
+		Dataset:        tableName,
+		CSVPath:        csvPath,
+		S3Client:       s3Client,
+		IndexerBuilder: indexerBuilder,
+		S3IndexPrefix:  config.S3IndexPrefix,
+		S3Mount:        config.S3Mount,
+		IndexerWorkDir: config.IndexerWorkDir,
+		ImportMemLimit: config.IndexerMemLimit,
 	}
 
 	var actionErr error
@@ -1508,6 +1705,18 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 	}
 	tableSlots := actions2.DiscoverTableSlots(clients, tableNames)
 
+	// Fetch table configs to get clusterMain setting for each table
+	tableConfigs := make(map[string]*client.TableConfigResponse)
+	for _, t := range tablesConfig {
+		for _, c := range clients {
+			cfg, err := c.GetTableConfig(t.Name, 0)
+			if err == nil {
+				tableConfigs[t.Name] = cfg
+				break
+			}
+		}
+	}
+
 	// Fetch tables from each replica
 	type replicaTables struct {
 		index  int
@@ -1537,10 +1746,17 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 	// Build response
 	var tableEntries []TableStatusEntry
 	for _, tableConfig := range tablesConfig {
+		// Default clusterMain to true if we couldn't fetch config
+		clusterMain := true
+		if cfg, ok := tableConfigs[tableConfig.Name]; ok {
+			clusterMain = cfg.ClusterMain
+		}
+
 		entry := TableStatusEntry{
-			Name:     tableConfig.Name,
-			CsvPath:  tableConfig.CsvPath,
-			Replicas: make([]TableReplicaStatus, len(clients)),
+			Name:        tableConfig.Name,
+			CsvPath:     tableConfig.CsvPath,
+			ClusterMain: clusterMain,
+			Replicas:    make([]TableReplicaStatus, len(clients)),
 		}
 
 		// Look up the active slot for this specific table (default to "a")
@@ -1658,7 +1874,198 @@ func getTablesConfigFromJSON(tablesConfigJSON string) ([]TableConfig, error) {
 	for name, csvPath := range configMap {
 		tables = append(tables, TableConfig{Name: name, CsvPath: csvPath})
 	}
+	sort.Slice(tables, func(i, j int) bool {
+		return tables[i].Name < tables[j].Name
+	})
 	return tables, nil
+}
+
+// handleQuery handles POST /api/query - executes SQL queries against Manticore
+func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request
+	var req QueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if strings.TrimSpace(req.Query) == "" {
+		jsonError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+
+	// Get replica count
+	replicaCount, err := s.getReplicaCount()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get replica count: %v", err))
+		return
+	}
+
+	if req.Broadcast {
+		s.handleBroadcastQuery(w, req.Query, replicaCount)
+	} else {
+		s.handleSingleQuery(w, req.Query, req.ReplicaIndex, replicaCount)
+	}
+}
+
+// buildManticoreDSN builds a MySQL DSN for connecting to a Manticore replica
+func (s *Server) buildManticoreDSN(replicaIndex int) string {
+	host := fmt.Sprintf("%s-%d.%s", s.config.WorkloadName, replicaIndex, s.config.WorkloadName)
+	return fmt.Sprintf("tcp(%s:%s)/", host, s.config.ManticoreMySQLPort)
+}
+
+// executeQueryOnReplica executes a SQL query on a specific replica and returns the result
+func (s *Server) executeQueryOnReplica(query string, replicaIndex int) *ReplicaQueryResult {
+	start := time.Now()
+
+	dsn := s.buildManticoreDSN(replicaIndex)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return &ReplicaQueryResult{
+			ReplicaIndex: replicaIndex,
+			Status:       "error",
+			Error:        fmt.Sprintf("connection failed: %v", err),
+		}
+	}
+	defer db.Close()
+
+	// Set connection timeout
+	db.SetConnMaxLifetime(30 * time.Second)
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return &ReplicaQueryResult{
+			ReplicaIndex: replicaIndex,
+			Status:       "error",
+			Error:        err.Error(),
+		}
+	}
+	defer rows.Close()
+
+	// Get column info
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return &ReplicaQueryResult{
+			ReplicaIndex: replicaIndex,
+			Status:       "error",
+			Error:        fmt.Sprintf("failed to get column types: %v", err),
+		}
+	}
+
+	columns := make([]ColumnMeta, len(columnTypes))
+	for i, ct := range columnTypes {
+		columns[i] = ColumnMeta{
+			Name: ct.Name(),
+			Type: ct.DatabaseTypeName(),
+		}
+	}
+
+	// Scan rows
+	var resultRows []map[string]interface{}
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := rows.Scan(valuePtrs...); err != nil {
+			continue
+		}
+
+		row := make(map[string]interface{})
+		for i, col := range columns {
+			val := values[i]
+			// Convert []byte to string for readability
+			if b, ok := val.([]byte); ok {
+				row[col.Name] = string(b)
+			} else {
+				row[col.Name] = val
+			}
+		}
+		resultRows = append(resultRows, row)
+	}
+
+	return &ReplicaQueryResult{
+		ReplicaIndex:    replicaIndex,
+		Status:          "success",
+		Columns:         columns,
+		Rows:            resultRows,
+		RowCount:        len(resultRows),
+		ExecutionTimeMs: time.Since(start).Milliseconds(),
+	}
+}
+
+// handleSingleQuery handles a query to a single replica (load balanced or targeted)
+func (s *Server) handleSingleQuery(w http.ResponseWriter, query string, targetReplica *int, replicaCount int) {
+	if targetReplica != nil {
+		// Target specific replica
+		if *targetReplica < 0 || *targetReplica >= replicaCount {
+			jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid replicaIndex: %d (valid range 0-%d)", *targetReplica, replicaCount-1))
+			return
+		}
+
+		result := s.executeQueryOnReplica(query, *targetReplica)
+		s.writeQueryResponse(w, result)
+		return
+	}
+
+	// Load balanced: try replicas in order until one succeeds
+	for i := 0; i < replicaCount; i++ {
+		result := s.executeQueryOnReplica(query, i)
+		if result.Status == "success" {
+			s.writeQueryResponse(w, result)
+			return
+		}
+		slog.Debug("query failed on replica, trying next", "replica", i, "error", result.Error)
+	}
+
+	// All replicas failed
+	jsonError(w, http.StatusServiceUnavailable, "query failed on all replicas")
+}
+
+// writeQueryResponse writes a ReplicaQueryResult as a QueryResponse
+func (s *Server) writeQueryResponse(w http.ResponseWriter, result *ReplicaQueryResult) {
+	response := QueryResponse{
+		Status:          result.Status,
+		Columns:         result.Columns,
+		Rows:            result.Rows,
+		RowCount:        result.RowCount,
+		ExecutionTimeMs: result.ExecutionTimeMs,
+		ReplicaIndex:    &result.ReplicaIndex,
+		Error:           result.Error,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleBroadcastQuery handles a query broadcast to all replicas
+func (s *Server) handleBroadcastQuery(w http.ResponseWriter, query string, replicaCount int) {
+	results := make([]ReplicaQueryResult, replicaCount)
+	var wg sync.WaitGroup
+
+	for i := 0; i < replicaCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			result := s.executeQueryOnReplica(query, idx)
+			results[idx] = *result
+		}(i)
+	}
+	wg.Wait()
+
+	response := BroadcastQueryResponse{
+		Status:  "ok",
+		Results: results,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func jsonError(w http.ResponseWriter, status int, message string) {

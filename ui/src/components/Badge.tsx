@@ -7,13 +7,13 @@ interface BadgeProps {
 
 export const Badge = ({ children, variant = 'default', size = 'md', className }: BadgeProps) => {
   const variantClasses = {
-    success: 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200 border border-transparent dark:border-green-200',
-    warning: 'bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 border border-transparent dark:border-yellow-200',
-    error: 'bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 border border-transparent dark:border-red-200',
-    info: 'bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 border border-transparent dark:border-blue-200',
-    default: 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 border border-transparent dark:border-gray-200',
-    orange: 'bg-orange-100 dark:bg-orange-900 text-orange-800 dark:text-orange-200 border border-transparent dark:border-orange-200',
-    cyan: 'bg-white dark:bg-blue-900 text-cpln-cyan dark:text-blue-200 border border-cpln-cyan dark:border-blue-200',
+    success: 'bg-green-100 dark:bg-green-950 text-green-800 dark:text-green-300 border border-transparent dark:border-green-500',
+    warning: 'bg-yellow-100 dark:bg-yellow-950 text-yellow-800 dark:text-yellow-300 border border-transparent dark:border-yellow-500',
+    error: 'bg-red-100 dark:bg-red-950 text-red-800 dark:text-red-300 border border-transparent dark:border-red-500',
+    info: 'bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 border border-transparent dark:border-blue-500',
+    default: 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-300 border border-transparent dark:border-gray-600',
+    orange: 'bg-orange-100 dark:bg-orange-950 text-orange-800 dark:text-orange-300 border border-transparent dark:border-orange-500',
+    cyan: 'bg-white dark:bg-blue-950 text-cpln-cyan dark:text-blue-300 border border-cpln-cyan dark:border-blue-500',
     muted: 'bg-gray-200 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-transparent',
   };
 

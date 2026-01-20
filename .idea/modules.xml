@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/manticore-cpln-orchestrator.iml" filepath="$PROJECT_DIR$/.idea/manticore-cpln-orchestrator.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/manticore-orchestrator.iml" filepath="$PROJECT_DIR$/.idea/manticore-orchestrator.iml" />
     </modules>
   </component>
 </project>

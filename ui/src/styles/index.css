@@ -65,4 +65,19 @@
   .chevron-expand[data-expanded="true"] {
     transform: rotate(90deg);
   }
+
+  /* Healthy indicator pulse animation */
+  .pulse-healthy {
+    background-color: rgb(34 197 94); /* green-500 */
+    animation: pulse-green 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-green {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.4;
+    }
+  }
 }

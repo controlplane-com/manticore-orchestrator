@@ -48,6 +48,7 @@ export interface ReplicaStatus {
   clusterStatus: string | null;
   nodeState: string | null;
   error: string | null;
+  deploymentMessage?: string;
 }
 
 // Cluster response from /api/cluster
@@ -95,6 +96,7 @@ export interface TableReplicaStatus {
 export interface TableStatusEntry {
   name: string;
   csvPath: string;
+  clusterMain: boolean; // Whether main table should be in cluster
   replicas: TableReplicaStatus[];
 }
 
@@ -154,4 +156,42 @@ export interface RepairStatus {
 // Repairs response from /api/repairs
 export interface RepairsResponse {
   repairs: RepairStatus[];
+}
+
+// SQL query request
+export interface SqlQueryRequest {
+  query: string;
+  replicaIndex?: number; // Optional: target specific replica
+  broadcast?: boolean; // Execute on all replicas
+}
+
+// SQL query column metadata
+export interface SqlColumnMeta {
+  name: string;
+  type: string;
+}
+
+// SQL query response for single replica
+export interface SqlQueryResponse extends ApiResponse {
+  columns?: SqlColumnMeta[];
+  rows?: Record<string, any>[];
+  rowCount?: number;
+  executionTimeMs?: number;
+  replicaIndex?: number; // Which replica responded
+}
+
+// Per-replica result for broadcast mode
+export interface SqlReplicaResult {
+  replicaIndex: number;
+  status: 'success' | 'error';
+  columns?: SqlColumnMeta[];
+  rows?: Record<string, any>[];
+  rowCount?: number;
+  executionTimeMs?: number;
+  error?: string;
+}
+
+// SQL broadcast response (results from each replica)
+export interface SqlBroadcastResponse extends ApiResponse {
+  results: SqlReplicaResult[];
 }

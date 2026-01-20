@@ -11,6 +11,9 @@ import type {
   ImportsResponse,
   RepairsResponse,
   CommandHistoryResponse,
+  SqlQueryRequest,
+  SqlQueryResponse,
+  SqlBroadcastResponse,
 } from '../types/api';
 
 const api = axios.create({
@@ -98,6 +101,14 @@ export const getRepairs = async (): Promise<RepairsResponse> => {
 // Get command history (authenticated)
 export const getCommandHistory = async (): Promise<CommandHistoryResponse> => {
   const response = await api.get('/commands');
+  return response.data;
+};
+
+// Execute SQL query (authenticated)
+export const executeSqlQuery = async (
+  request: SqlQueryRequest
+): Promise<SqlQueryResponse | SqlBroadcastResponse> => {
+  const response = await api.post('/query', request);
   return response.data;
 };
 

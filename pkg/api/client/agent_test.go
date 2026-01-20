@@ -362,7 +362,7 @@ func TestAgentClient_CreateDistributed(t *testing.T) {
 	defer server.Close()
 
 	client := NewAgentClient(server.URL, "token")
-	err := client.CreateDistributed("products", []string{"products_main_a", "products_delta"}, 0)
+	err := client.CreateDistributed("products", []string{"products_main_a", "products_delta"}, nil, "", 0, 0)
 
 	if err != nil {
 		t.Fatalf("CreateDistributed() error: %v", err)
@@ -376,7 +376,7 @@ func TestAgentClient_CreateDistributed(t *testing.T) {
 }
 
 func TestAgentClient_StartImport(t *testing.T) {
-	var receivedTable, receivedPath string
+	var receivedTable, receivedPath, receivedMethod string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/import" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
@@ -385,10 +385,11 @@ func TestAgentClient_StartImport(t *testing.T) {
 			t.Errorf("unexpected method: %s", r.Method)
 		}
 
-		var body map[string]string
+		var body types.ImportRequest
 		json.NewDecoder(r.Body).Decode(&body)
-		receivedTable = body["table"]
-		receivedPath = body["csvPath"]
+		receivedTable = body.Table
+		receivedPath = body.CSVPath
+		receivedMethod = string(body.Method)
 
 		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte(`{"jobId":"test-job-123"}`))
@@ -396,7 +397,12 @@ func TestAgentClient_StartImport(t *testing.T) {
 	defer server.Close()
 
 	client := NewAgentClient(server.URL, "token")
-	jobID, err := client.StartImport("products", "/data/products.csv", 0, false)
+	jobID, err := client.StartImport(types.ImportRequest{
+		Table:   "products",
+		CSVPath: "/data/products.csv",
+		Cluster: "test-cluster",
+		Method:  types.ImportMethodIndexer,
+	}, 0)
 
 	if err != nil {
 		t.Fatalf("StartImport() error: %v", err)
@@ -409,6 +415,9 @@ func TestAgentClient_StartImport(t *testing.T) {
 	}
 	if receivedPath != "/data/products.csv" {
 		t.Errorf("received csvPath = %q, want '/data/products.csv'", receivedPath)
+	}
+	if receivedMethod != "indexer" {
+		t.Errorf("received method = %q, want 'indexer'", receivedMethod)
 	}
 }
 
@@ -469,7 +478,7 @@ func TestAgentClient_Import(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 		PollTimeout:  5 * time.Second,
 	}
-	err := client.ImportWithConfig("products", "/data/products.csv", 0, config)
+	err := client.ImportWithConfig("products", "/data/products.csv", "test-cluster", 0, config)
 
 	if err != nil {
 		t.Fatalf("Import() error: %v", err)
@@ -496,7 +505,7 @@ func TestAgentClient_Import_Failure(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 		PollTimeout:  5 * time.Second,
 	}
-	err := client.ImportWithConfig("products", "/data/products.csv", 0, config)
+	err := client.ImportWithConfig("products", "/data/products.csv", "test-cluster", 0, config)
 
 	if err == nil {
 		t.Fatal("Import() should have returned error for failed job")

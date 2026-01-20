@@ -490,14 +490,26 @@ func stepCreateTables(ctx *initContext) error {
 		deltaTable := table.Name + "_delta"
 		distTable := table.Name
 
-		slog.Debug("creating tables", "main", mainTable, "delta", deltaTable, "distributed", distTable)
+		// Fetch table config to determine cluster membership and HA options
+		tableConfig, err := primaryClient.GetTableConfig(table.Name, 1)
+		if err != nil {
+			slog.Warn("failed to fetch table config, using defaults", "table", table.Name, "error", err)
+			tableConfig = &client.TableConfigResponse{
+				ImportMethod:    "bulk",
+				ClusterMain:     true,
+				HAStrategy:      "nodeads",
+				AgentRetryCount: 0,
+			}
+		}
+
+		slog.Debug("creating tables", "main", mainTable, "delta", deltaTable, "distributed", distTable, "clusterMain", tableConfig.ClusterMain)
 
 		// Create delta table (idempotent)
 		if err := primaryClient.CreateTable(deltaTable, 0); err != nil {
 			slog.Debug("delta table creation (may already exist)", "table", deltaTable, "error", err)
 		}
 
-		// Add delta table to cluster (idempotent)
+		// Add delta table to cluster (idempotent) - delta is always clustered
 		if err := primaryClient.ClusterAdd(deltaTable, 0); err != nil {
 			slog.Debug("delta table cluster add (may already be added)", "table", deltaTable, "error", err)
 		}
@@ -507,23 +519,49 @@ func stepCreateTables(ctx *initContext) error {
 			slog.Debug("main table creation (may already exist)", "table", mainTable, "error", err)
 		}
 
-		// Add main table to cluster (idempotent)
-		if err := primaryClient.ClusterAdd(mainTable, 0); err != nil {
-			slog.Debug("main table cluster add (may already be added)", "table", mainTable, "error", err)
+		// Conditionally add main table to cluster based on schema config
+		if tableConfig.ClusterMain {
+			if err := primaryClient.ClusterAdd(mainTable, 0); err != nil {
+				slog.Debug("main table cluster add (may already be added)", "table", mainTable, "error", err)
+			}
+		} else {
+			// When not clustered, create the main table on all other replicas
+			slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", mainTable)
+			for i, c := range ctx.clients {
+				if c == primaryClient {
+					continue // Already created on primary
+				}
+				if err := c.CreateTable(mainTable, 0); err != nil {
+					slog.Debug("main table creation on replica (may already exist)", "table", mainTable, "replica", i, "error", err)
+				}
+			}
 		}
 
-		// Wait for replication
+		// Wait for delta table replication (always clustered)
 		if err := waitForTableReplication(ctx.clients, deltaTable); err != nil {
 			slog.Warn("timeout waiting for delta table replication", "table", deltaTable, "error", err)
 		}
-		if err := waitForTableReplication(ctx.clients, mainTable); err != nil {
-			slog.Warn("timeout waiting for main table replication", "table", mainTable, "error", err)
+
+		// Wait for main table replication only if clustered
+		if tableConfig.ClusterMain {
+			if err := waitForTableReplication(ctx.clients, mainTable); err != nil {
+				slog.Warn("timeout waiting for main table replication", "table", mainTable, "error", err)
+			}
 		}
 
-		// Create distributed table on all replicas (idempotent)
+		// Build agent list: ALL replicas (same config everywhere)
+		var agents []string
+		for _, c := range ctx.clients {
+			agentAddr := extractAgentAddr(c.BaseURL())
+			if agentAddr != "" {
+				agents = append(agents, agentAddr)
+			}
+		}
+
+		// Create distributed table on all replicas with mirror agents (idempotent)
 		locals := []string{mainTable, deltaTable}
 		for i, c := range ctx.clients {
-			if err := c.CreateDistributed(distTable, locals, 0); err != nil {
+			if err := c.CreateDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 0); err != nil {
 				slog.Debug("distributed table creation (may already exist)", "table", distTable, "replica", i, "error", err)
 			}
 		}
@@ -598,6 +636,17 @@ func waitForTableReplication(clients []*client.AgentClient, table string) error 
 	}
 
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
+}
+
+// extractAgentAddr converts HTTP URL to Manticore agent address
+// e.g., "http://manticore-0.manticore:8080" -> "manticore-0.manticore:9306"
+func extractAgentAddr(httpURL string) string {
+	u, err := url.Parse(httpURL)
+	if err != nil {
+		return ""
+	}
+	// Replace HTTP port with Manticore MySQL protocol port (9306)
+	return fmt.Sprintf("%s:9306", u.Hostname())
 }
 
 // Note: getReplicaInfo, toSharedReplicaInfo, and deriveReplicationAddr are defined in repair.go

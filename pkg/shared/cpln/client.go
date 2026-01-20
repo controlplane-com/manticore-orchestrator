@@ -443,3 +443,51 @@ func (c *Client) StartCronWorkload(gvc, workload, location string, containerOver
 	}
 	return c.CreateCommand(gvc, workload, "runCronWorkload", spec)
 }
+
+// DeploymentVersion represents a single replica's deployment status
+type DeploymentVersion struct {
+	Name       string                     `json:"name"`
+	Ready      bool                       `json:"ready"`
+	Message    string                     `json:"message"`
+	Containers map[string]ContainerStatus `json:"containers"`
+}
+
+// ContainerStatus represents a container's status within a deployment
+type ContainerStatus struct {
+	Name    string `json:"name"`
+	Ready   bool   `json:"ready"`
+	Message string `json:"message"`
+}
+
+// DeploymentStatus represents the status of a deployment
+type DeploymentStatus struct {
+	Ready    bool                `json:"ready"`
+	Message  string              `json:"message"`
+	Versions []DeploymentVersion `json:"versions"`
+}
+
+// Deployment represents a Control Plane deployment (per-location)
+type Deployment struct {
+	Name   string           `json:"name"`
+	Status DeploymentStatus `json:"status"`
+}
+
+// DeploymentList represents a list of deployments
+type DeploymentList struct {
+	Items []Deployment `json:"items"`
+}
+
+// GetDeployments fetches all deployments for a workload
+func (c *Client) GetDeployments(gvc, workload string) (*DeploymentList, error) {
+	path := fmt.Sprintf("/org/%s/gvc/%s/workload/%s/deployment", c.org, gvc, workload)
+	body, err := c.DoRequest("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var list DeploymentList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("failed to parse deployments: %w", err)
+	}
+	return &list, nil
+}

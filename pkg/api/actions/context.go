@@ -4,6 +4,8 @@ import (
 	"log/slog"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/s3"
 )
 
 // Context holds the execution context for actions
@@ -11,6 +13,15 @@ type Context struct {
 	Clients []*client.AgentClient
 	Dataset string // e.g., "addresses"
 	CSVPath string // e.g., "addresses.csv"
+	Cluster string // Cluster name for replication
+
+	// Indexer-related configuration (only used when importMethod is "indexer")
+	S3Client       *s3.Client            // S3 client for uploading indexes
+	IndexerBuilder *indexer.IndexBuilder // Indexer for building indexes locally
+	S3IndexPrefix  string                // S3 prefix for index uploads (e.g., "indexer-output")
+	S3Mount        string                // Mount path agents use for S3 (e.g., "/mnt/s3")
+	IndexerWorkDir string                // Local temp directory for indexer builds
+	ImportMemLimit string                // Memory limit for indexer (e.g., "2G")
 }
 
 // MainTableName returns the main table name for a given slot

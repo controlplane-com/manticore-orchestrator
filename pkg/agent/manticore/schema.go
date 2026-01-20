@@ -37,8 +37,12 @@ type Column struct {
 
 // Schema represents the parsed schema configuration
 type Schema struct {
-	Columns    []Column
-	JSONConfig string // Raw JSON for passing to csv-to-manticore
+	Columns         []Column
+	JSONConfig      string // Raw JSON for passing to csv-to-manticore
+	ImportMethod    string // "bulk" or "indexer", defaults to "bulk"
+	ClusterMain     bool   // Whether to add main table to cluster, defaults to true
+	HAStrategy      string // HA strategy for distributed table mirrors, defaults to "nodeads"
+	AgentRetryCount int    // Retry count for failed agents, defaults to 0
 }
 
 // csv-to-manticore type to ColumnType mapping
@@ -141,11 +145,20 @@ type SchemaRegistry struct {
 	schemas map[string]*Schema
 }
 
+// TableBehaviorConfig holds per-table behavior settings
+type TableBehaviorConfig struct {
+	ImportMethod    string `yaml:"importMethod" json:"importMethod"`       // "bulk" or "indexer"
+	ClusterMain     *bool  `yaml:"clusterMain" json:"clusterMain"`         // Use pointer for nil-check (default true)
+	HAStrategy      string `yaml:"haStrategy" json:"haStrategy"`           // "random", "roundrobin", "nodeads" (default), "noerrors"
+	AgentRetryCount *int   `yaml:"agentRetryCount" json:"agentRetryCount"` // Pointer for nil-check (default 0)
+}
+
 // SchemaConfig represents the YAML structure for a single table schema (JSON format)
 type SchemaConfig struct {
 	Schema struct {
 		Columns []Column `yaml:"columns"`
 	} `yaml:"schema"`
+	Config TableBehaviorConfig `yaml:"config"`
 }
 
 // NewSchemaRegistry creates a new empty schema registry
@@ -174,9 +187,34 @@ func (r *SchemaRegistry) LoadFromFile(path string) error {
 			return fmt.Errorf("failed to generate JSON config for %s: %w", tableName, err)
 		}
 
+		// Apply defaults for behavior config
+		importMethod := "bulk"
+		if config.Config.ImportMethod != "" {
+			importMethod = config.Config.ImportMethod
+		}
+
+		clusterMain := true
+		if config.Config.ClusterMain != nil {
+			clusterMain = *config.Config.ClusterMain
+		}
+
+		haStrategy := "nodeads"
+		if config.Config.HAStrategy != "" {
+			haStrategy = config.Config.HAStrategy
+		}
+
+		agentRetryCount := 0
+		if config.Config.AgentRetryCount != nil {
+			agentRetryCount = *config.Config.AgentRetryCount
+		}
+
 		r.schemas[tableName] = &Schema{
-			Columns:    config.Schema.Columns,
-			JSONConfig: string(jsonConfig),
+			Columns:         config.Schema.Columns,
+			JSONConfig:      string(jsonConfig),
+			ImportMethod:    importMethod,
+			ClusterMain:     clusterMain,
+			HAStrategy:      haStrategy,
+			AgentRetryCount: agentRetryCount,
 		}
 	}
 

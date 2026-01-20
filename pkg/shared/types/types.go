@@ -49,14 +49,20 @@ type DropTableRequest struct {
 
 // AlterDistributedRequest is the request body for altering a distributed table
 type AlterDistributedRequest struct {
-	Distributed string   `json:"distributed"`
-	Locals      []string `json:"locals"`
+	Distributed     string   `json:"distributed"`
+	Locals          []string `json:"locals"`
+	Agents          []string `json:"agents,omitempty"`          // Mirror agent addresses (host:port format)
+	HAStrategy      string   `json:"haStrategy,omitempty"`      // "random", "roundrobin", "nodeads", "noerrors"
+	AgentRetryCount int      `json:"agentRetryCount,omitempty"` // Retry count for failed agents
 }
 
 // CreateDistributedRequest is the request body for creating a distributed table
 type CreateDistributedRequest struct {
-	Distributed string   `json:"distributed"`
-	Locals      []string `json:"locals"`
+	Distributed     string   `json:"distributed"`
+	Locals          []string `json:"locals"`
+	Agents          []string `json:"agents,omitempty"`          // Mirror agent addresses (host:port format)
+	HAStrategy      string   `json:"haStrategy,omitempty"`      // "random", "roundrobin", "nodeads", "noerrors"
+	AgentRetryCount int      `json:"agentRetryCount,omitempty"` // Retry count for failed agents
 }
 
 // ClusterAddRequest is the request body for adding a table to the cluster
@@ -79,13 +85,25 @@ type ClusterRejoinRequest struct {
 	SourceAddr string `json:"sourceAddr"` // e.g., "manticore-0.manticore:9312"
 }
 
+// ImportMethod represents the import method to use
+type ImportMethod string
+
+const (
+	ImportMethodBulk    ImportMethod = "bulk"    // Default: HTTP bulk API
+	ImportMethodIndexer ImportMethod = "indexer" // Use indexer + ATTACH INDEX
+)
+
 // ImportRequest is the request body for importing data
 type ImportRequest struct {
-	Table     string `json:"table"`
-	CSVPath   string `json:"csvPath"`
-	Workers   int    `json:"workers,omitempty"`   // Override IMPORT_WORKERS env var
-	BatchSize int    `json:"batchSize,omitempty"` // Override IMPORT_BATCH_SIZE env var
-	Resume    bool   `json:"resume,omitempty"`    // Resume from last checkpoint
+	Table             string       `json:"table"`
+	CSVPath           string       `json:"csvPath"`
+	Cluster           string       `json:"cluster,omitempty"`           // Cluster name for bulk API (optional)
+	Workers           int          `json:"workers,omitempty"`           // Override IMPORT_WORKERS env var
+	BatchSize         int          `json:"batchSize,omitempty"`         // Override IMPORT_BATCH_SIZE env var
+	Resume            bool         `json:"resume,omitempty"`            // Resume from last checkpoint
+	Method            ImportMethod `json:"method,omitempty"`            // Import method (bulk or indexer)
+	MemLimit          string       `json:"memLimit,omitempty"`          // Memory limit for indexer (e.g., "2G", "4G")
+	PrebuiltIndexPath string       `json:"prebuiltIndexPath,omitempty"` // Path to pre-built index on S3 mount
 }
 
 // ImportJobStatus represents the status of an async import job
@@ -101,18 +119,22 @@ const (
 
 // ImportJob represents an async import job
 type ImportJob struct {
-	ID             string          `json:"id"`
-	Table          string          `json:"table"`
-	CSVPath        string          `json:"csvPath"`
-	Status         ImportJobStatus `json:"status"`
-	Error          string          `json:"error,omitempty"`
-	StartedAt      *int64          `json:"startedAt,omitempty"` // Unix timestamp
-	EndedAt        *int64          `json:"endedAt,omitempty"`   // Unix timestamp
-	Workers        int             `json:"workers"`             // Number of worker goroutines
-	BatchSize      int             `json:"batchSize"`           // Rows per INSERT statement
-	LastLineNum    int64           `json:"lastLineNum"`         // Checkpoint for resume
-	ProcessedLines int64           `json:"processedLines"`      // Lines successfully processed
-	FailedLines    int64           `json:"failedLines"`         // Lines that failed
+	ID                string          `json:"id"`
+	Table             string          `json:"table"`
+	CSVPath           string          `json:"csvPath"`
+	Cluster           string          `json:"cluster,omitempty"`           // Cluster name used for this import
+	Method            ImportMethod    `json:"method,omitempty"`            // Import method used
+	MemLimit          string          `json:"memLimit,omitempty"`          // Memory limit for indexer
+	PrebuiltIndexPath string          `json:"prebuiltIndexPath,omitempty"` // Path to pre-built index
+	Status            ImportJobStatus `json:"status"`
+	Error             string          `json:"error,omitempty"`
+	StartedAt         *int64          `json:"startedAt,omitempty"` // Unix timestamp
+	EndedAt           *int64          `json:"endedAt,omitempty"`   // Unix timestamp
+	Workers           int             `json:"workers"`             // Number of worker goroutines
+	BatchSize         int             `json:"batchSize"`           // Rows per INSERT statement
+	LastLineNum       int64           `json:"lastLineNum"`         // Checkpoint for resume
+	ProcessedLines    int64           `json:"processedLines"`      // Lines successfully processed
+	FailedLines       int64           `json:"failedLines"`         // Lines that failed
 }
 
 // StartImportResponse is returned when starting an async import
