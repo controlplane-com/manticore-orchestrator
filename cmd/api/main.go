@@ -48,6 +48,9 @@ type Config struct {
 	S3Mount         string // Mount path agents use for S3 (default: "/mnt/s3")
 	IndexerWorkDir  string // Local temp directory for indexer builds (default: "/tmp/indexer")
 	IndexerMemLimit string // Memory limit for indexer (default: "2G")
+
+	// Shared volume configuration (alternative to S3 for indexer output)
+	SharedVolumeMount string // Mount path for shared volume (e.g., "/mnt/shared") - same path on cron and agents
 }
 
 // Server is the orchestrator REST API server
@@ -142,6 +145,8 @@ func main() {
 		S3Mount:         getEnv("S3_MOUNT", "/mnt/s3"),
 		IndexerWorkDir:  getEnv("INDEXER_WORK_DIR", "/tmp/indexer"),
 		IndexerMemLimit: getEnv("INDEXER_MEM_LIMIT", "2G"),
+		// Shared volume configuration (alternative to S3)
+		SharedVolumeMount: getEnv("SHARED_VOLUME_MOUNT", ""),
 	}
 
 	if config.AuthToken == "" {
@@ -1452,29 +1457,40 @@ func runCLI(config Config) {
 	clients := buildClientsStatic(config, replicaCount)
 
 	// Initialize S3 client and indexer builder if S3 bucket is configured (for indexer method)
+	// Initialize S3 client if S3 bucket is configured
 	var s3Client *s3.Client
-	var indexerBuilder *indexer.IndexBuilder
 	if config.S3Bucket != "" {
 		var err error
 		s3Client, err = s3.NewClient(config.S3Bucket, config.S3Region)
 		if err != nil {
-			slog.Warn("failed to create S3 client - indexer method will not work", "error", err)
+			slog.Warn("failed to create S3 client", "error", err)
 		} else {
-			indexerBuilder = indexer.NewIndexBuilder(config.IndexerWorkDir)
-			slog.Debug("S3 client and indexer builder initialized", "bucket", config.S3Bucket, "workDir", config.IndexerWorkDir)
+			slog.Debug("S3 client initialized", "bucket", config.S3Bucket)
+		}
+	}
+
+	// Initialize indexer builder if either S3 or shared volume is configured
+	var indexerBuilder *indexer.IndexBuilder
+	if s3Client != nil || config.SharedVolumeMount != "" {
+		indexerBuilder = indexer.NewIndexBuilder(config.IndexerWorkDir)
+		if config.SharedVolumeMount != "" {
+			slog.Debug("indexer builder initialized with shared volume", "sharedVolume", config.SharedVolumeMount)
+		} else {
+			slog.Debug("indexer builder initialized with S3", "workDir", config.IndexerWorkDir)
 		}
 	}
 
 	ctx := &actions2.Context{
-		Clients:        clients,
-		Dataset:        tableName,
-		CSVPath:        csvPath,
-		S3Client:       s3Client,
-		IndexerBuilder: indexerBuilder,
-		S3IndexPrefix:  config.S3IndexPrefix,
-		S3Mount:        config.S3Mount,
-		IndexerWorkDir: config.IndexerWorkDir,
-		ImportMemLimit: config.IndexerMemLimit,
+		Clients:           clients,
+		Dataset:           tableName,
+		CSVPath:           csvPath,
+		S3Client:          s3Client,
+		IndexerBuilder:    indexerBuilder,
+		S3IndexPrefix:     config.S3IndexPrefix,
+		S3Mount:           config.S3Mount,
+		IndexerWorkDir:    config.IndexerWorkDir,
+		ImportMemLimit:    config.IndexerMemLimit,
+		SharedVolumeMount: config.SharedVolumeMount,
 	}
 
 	var actionErr error

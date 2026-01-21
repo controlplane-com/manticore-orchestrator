@@ -780,8 +780,15 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Table == "" || req.CSVPath == "" {
-		errorResponse(w, http.StatusBadRequest, "table and csvPath are required")
+	if req.Table == "" {
+		errorResponse(w, http.StatusBadRequest, "table is required")
+		return
+	}
+
+	// For indexer method with prebuilt index, CSV path is not required on agent side
+	// (the CSV was already processed by the cron job)
+	if req.PrebuiltIndexPath == "" && req.CSVPath == "" {
+		errorResponse(w, http.StatusBadRequest, "csvPath is required (unless using prebuilt index)")
 		return
 	}
 
@@ -793,15 +800,30 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build full path and validate CSV exists
-	csvFullPath := filepath.Join(h.s3Mount, req.CSVPath)
-	if _, err := os.Stat(csvFullPath); err != nil {
-		if os.IsNotExist(err) {
-			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("CSV file not found: %s", csvFullPath))
+	// Build full path and validate CSV exists (skip for prebuilt index imports)
+	var csvFullPath string
+	if req.PrebuiltIndexPath != "" {
+		// Prebuilt index: validate the index path exists instead
+		if _, err := os.Stat(req.PrebuiltIndexPath); err != nil {
+			if os.IsNotExist(err) {
+				errorResponse(w, http.StatusBadRequest, fmt.Sprintf("prebuilt index not found: %s", req.PrebuiltIndexPath))
+				return
+			}
+			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat prebuilt index: %v", err))
 			return
 		}
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat CSV file: %v", err))
-		return
+		slog.Debug("using prebuilt index", "path", req.PrebuiltIndexPath)
+	} else {
+		// Bulk import: validate CSV exists
+		csvFullPath = filepath.Join(h.s3Mount, req.CSVPath)
+		if _, err := os.Stat(csvFullPath); err != nil {
+			if os.IsNotExist(err) {
+				errorResponse(w, http.StatusBadRequest, fmt.Sprintf("CSV file not found: %s", csvFullPath))
+				return
+			}
+			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat CSV file: %v", err))
+			return
+		}
 	}
 
 	// Determine worker count (API override > env default)

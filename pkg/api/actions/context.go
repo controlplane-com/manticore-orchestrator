@@ -16,12 +16,16 @@ type Context struct {
 	Cluster string // Cluster name for replication
 
 	// Indexer-related configuration (only used when importMethod is "indexer")
-	S3Client       *s3.Client            // S3 client for uploading indexes
+	S3Client       *s3.Client            // S3 client for uploading indexes (nil for shared volume mode)
 	IndexerBuilder *indexer.IndexBuilder // Indexer for building indexes locally
 	S3IndexPrefix  string                // S3 prefix for index uploads (e.g., "indexer-output")
 	S3Mount        string                // Mount path agents use for S3 (e.g., "/mnt/s3")
 	IndexerWorkDir string                // Local temp directory for indexer builds
 	ImportMemLimit string                // Memory limit for indexer (e.g., "2G")
+
+	// Shared volume configuration (alternative to S3 for indexer output)
+	// When SharedVolumeMount is set, indexer writes directly to shared volume and skips S3 upload
+	SharedVolumeMount string // Mount path for shared volume (e.g., "/mnt/shared") - same path on cron and agents
 }
 
 // MainTableName returns the main table name for a given slot

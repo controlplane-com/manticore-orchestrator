@@ -281,33 +281,52 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
 }
 
-// importWithIndexer builds index locally, uploads to S3, and imports on agents
+// importWithIndexer builds index locally, uploads to S3 or shared volume, and imports on agents
 func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, tableConfig *client.TableConfigResponse, primary *client.AgentClient, cleanup func()) error {
-	// Validate S3 client is configured
-	if ctx.S3Client == nil {
-		return fmt.Errorf("S3 client not configured (required for indexer method)")
-	}
+	// Validate indexer builder is configured
 	if ctx.IndexerBuilder == nil {
 		return fmt.Errorf("indexer builder not configured (required for indexer method)")
 	}
 
+	// Determine storage mode: shared volume or S3
+	useSharedVolume := ctx.SharedVolumeMount != ""
+	if !useSharedVolume && ctx.S3Client == nil {
+		return fmt.Errorf("neither S3 client nor shared volume configured (one is required for indexer method)")
+	}
+
 	// Generate unique import ID for this operation
 	importID := uuid.New().String()
-	localWorkDir := filepath.Join(ctx.IndexerWorkDir, importID)
+
+	// Determine work directory and agent path based on storage mode
+	var workDir, agentIndexPath string
+	if useSharedVolume {
+		// Shared volume mode: build directly on shared volume
+		// Path structure: {SharedVolumeMount}/indexer-output/{dataset}/{importID}
+		workDir = filepath.Join(ctx.SharedVolumeMount, "indexer-output", ctx.Dataset, importID)
+		agentIndexPath = filepath.Join(workDir, "data", targetTable) // RT index is in data/{tableName}
+		slog.Info("using shared volume for indexer",
+			"workDir", workDir,
+			"agentPath", agentIndexPath)
+	} else {
+		// S3 mode: build locally, then upload
+		workDir = filepath.Join(ctx.IndexerWorkDir, importID)
+	}
 	s3Path := fmt.Sprintf("%s/%s/%s", ctx.S3IndexPrefix, ctx.Dataset, importID)
 
-	// Cleanup local temp files when done
-	defer func() {
-		if err := os.RemoveAll(localWorkDir); err != nil {
-			slog.Warn("failed to cleanup local work dir", "path", localWorkDir, "error", err)
-		}
-	}()
+	// Cleanup work directory when done (only for S3 mode - shared volume cleanup happens after all agents import)
+	if !useSharedVolume {
+		defer func() {
+			if err := os.RemoveAll(workDir); err != nil {
+				slog.Warn("failed to cleanup work dir", "path", workDir, "error", err)
+			}
+		}()
+	}
 
 	slog.Info("starting indexer import",
 		"table", targetTable,
 		"importID", importID,
-		"localWorkDir", localWorkDir,
-		"s3Path", s3Path)
+		"workDir", workDir,
+		"useSharedVolume", useSharedVolume)
 
 	// Get table schema from agent to determine columns
 	schemaResp, err := primary.GetTableSchema(ctx.Dataset, 1)
@@ -331,7 +350,8 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 		})
 	}
 
-	// Determine source path - CSV on S3 mount
+	// Determine source path - CSV is always on S3 mount (read-only)
+	// The shared volume is only used for indexer output, not for source data
 	sourcePath := filepath.Join(ctx.S3Mount, ctx.CSVPath)
 
 	// Set memory limit
@@ -340,9 +360,9 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 		memLimit = indexer.DefaultMemLimit
 	}
 
-	// Build index locally
+	// Build index
 	cfg := &indexer.Config{
-		WorkDir:    localWorkDir,
+		WorkDir:    workDir,
 		TableName:  targetTable,
 		SourcePath: sourcePath,
 		Columns:    columns,
@@ -356,16 +376,29 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 	}
 	slog.Info("index built", "rows", result.RowCount, "path", result.IndexPath)
 
-	// Upload to S3
-	if err := ctx.S3Client.UploadDirectory(goCtx, result.IndexPath, s3Path); err != nil {
-		cleanup()
-		return fmt.Errorf("S3 upload failed: %w", err)
-	}
-	slog.Info("index uploaded to S3", "path", s3Path)
+	// For S3 mode: upload to S3 and construct agent path
+	if !useSharedVolume {
+		if err := ctx.S3Client.UploadDirectory(goCtx, result.IndexPath, s3Path); err != nil {
+			cleanup()
+			return fmt.Errorf("S3 upload failed: %w", err)
+		}
+		slog.Info("index uploaded to S3", "path", s3Path)
 
-	// Construct the path agents will use to access the index
-	// Agents have S3 mounted at ctx.S3Mount, so they access: {S3Mount}/{s3Path}
-	agentIndexPath := filepath.Join(ctx.S3Mount, s3Path)
+		// Agents have S3 mounted at ctx.S3Mount, so they access: {S3Mount}/{s3Path}
+		agentIndexPath = filepath.Join(ctx.S3Mount, s3Path)
+	}
+	// For shared volume mode: agentIndexPath is already set (same path as where we built)
+	// Add a delay to allow shared volume filesystem to sync across pods
+	if useSharedVolume {
+		syncDelay := 10 * time.Second
+		slog.Info("waiting for shared volume sync before agent import", "delay", syncDelay, "path", agentIndexPath)
+		select {
+		case <-goCtx.Done():
+			cleanup()
+			return goCtx.Err()
+		case <-time.After(syncDelay):
+		}
+	}
 
 	// Build import config with prebuilt path
 	importConfig := client.ImportConfigFromEnv()
