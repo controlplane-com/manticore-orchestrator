@@ -426,7 +426,7 @@ func (h *Handler) AlterDistributed(w http.ResponseWriter, r *http.Request) {
 			clauses = append(clauses, fmt.Sprintf("ha_strategy='%s'", req.HAStrategy))
 		}
 		if req.AgentRetryCount > 0 {
-			clauses = append(clauses, fmt.Sprintf("agent_retry_count=%d", req.AgentRetryCount))
+			clauses = append(clauses, fmt.Sprintf("agent_retry_count='%d'", req.AgentRetryCount))
 		}
 	}
 
@@ -463,7 +463,7 @@ func (h *Handler) CreateDistributed(tableName string, locals []string, agents []
 			clauses = append(clauses, fmt.Sprintf("ha_strategy='%s'", haStrategy))
 		}
 		if agentRetryCount > 0 {
-			clauses = append(clauses, fmt.Sprintf("agent_retry_count=%d", agentRetryCount))
+			clauses = append(clauses, fmt.Sprintf("agent_retry_count='%d'", agentRetryCount))
 		}
 	}
 

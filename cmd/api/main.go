@@ -2075,9 +2075,40 @@ func (s *Server) handleBroadcastQuery(w http.ResponseWriter, query string, repli
 	}
 	wg.Wait()
 
+	// Filter out not-in-use replicas (DNS errors indicate replica doesn't exist)
+	// and determine overall status
+	var filteredResults []ReplicaQueryResult
+	successCount := 0
+	failureCount := 0
+
+	for _, r := range results {
+		// Check if this is a "no such host" error (replica doesn't exist)
+		if r.Error != "" && strings.Contains(r.Error, "no such host") {
+			// Mark as not_in_use and don't count as failure
+			r.Status = "not_in_use"
+			r.Error = "replica not in use"
+		}
+
+		filteredResults = append(filteredResults, r)
+
+		if r.Status == "ok" {
+			successCount++
+		} else if r.Status != "not_in_use" {
+			failureCount++
+		}
+	}
+
+	// Determine overall status
+	overallStatus := "ok"
+	if failureCount > 0 && successCount == 0 {
+		overallStatus = "error"
+	} else if failureCount > 0 {
+		overallStatus = "partial"
+	}
+
 	response := BroadcastQueryResponse{
-		Status:  "ok",
-		Results: results,
+		Status:  overallStatus,
+		Results: filteredResults,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
