@@ -86,28 +86,33 @@ func Import(goCtx context.Context, ctx *Context) error {
 	}
 
 	// Step 2: Create new main table on replica-0
-	slog.Debug("creating new main table", "table", newMainTable)
-	if err := primary.CreateTable(newMainTable, 0); err != nil {
-		return fmt.Errorf("failed to create new main table: %w", err)
-	}
-
-	// Step 3: Conditionally add new table to cluster based on schema config
-	if tableConfig.ClusterMain {
-		slog.Debug("adding new main table to cluster", "table", newMainTable)
-		if err := primary.ClusterAdd(newMainTable, 0); err != nil {
-			return fmt.Errorf("failed to add new main table to cluster: %w", err)
+	// Skip table creation for indexer method - IMPORT TABLE creates the table from index files
+	if tableConfig.ImportMethod != "indexer" {
+		slog.Debug("creating new main table", "table", newMainTable)
+		if err := primary.CreateTable(newMainTable, 0); err != nil {
+			return fmt.Errorf("failed to create new main table: %w", err)
 		}
-		clusterAddSucceeded = true
-	} else {
-		slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", newMainTable)
-		// When not clustered, we need to create the table on all replicas
-		for i, c := range ctx.Clients[1:] {
-			slog.Debug("creating main table on replica", "replica", i+1, "table", newMainTable)
-			if err := c.CreateTable(newMainTable, 0); err != nil {
-				cleanup()
-				return fmt.Errorf("failed to create main table on replica %d: %w", i+1, err)
+
+		// Step 3: Conditionally add new table to cluster based on schema config
+		if tableConfig.ClusterMain {
+			slog.Debug("adding new main table to cluster", "table", newMainTable)
+			if err := primary.ClusterAdd(newMainTable, 0); err != nil {
+				return fmt.Errorf("failed to add new main table to cluster: %w", err)
+			}
+			clusterAddSucceeded = true
+		} else {
+			slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", newMainTable)
+			// When not clustered, we need to create the table on all replicas
+			for i, c := range ctx.Clients[1:] {
+				slog.Debug("creating main table on replica", "replica", i+1, "table", newMainTable)
+				if err := c.CreateTable(newMainTable, 0); err != nil {
+					cleanup()
+					return fmt.Errorf("failed to create main table on replica %d: %w", i+1, err)
+				}
 			}
 		}
+	} else {
+		slog.Debug("skipping table creation for indexer method (IMPORT TABLE will create it)", "table", newMainTable)
 	}
 
 	// Step 4: Run import with schema-specified method
