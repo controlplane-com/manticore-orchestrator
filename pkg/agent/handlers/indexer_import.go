@@ -17,12 +17,15 @@ func (h *Handler) RunIndexerImport(ctx context.Context, job *types.ImportJob, sc
 		return fmt.Errorf("prebuiltIndexPath is required for indexer method")
 	}
 
-	// Verify path exists on S3 mount
-	if _, err := os.Stat(job.PrebuiltIndexPath); err != nil {
+	// Verify path exists by checking for the .meta file
+	// Manticore indexes are stored as multiple files with a common prefix (e.g., table.meta, table.0.spa, etc.)
+	// The PrebuiltIndexPath is the prefix, not a file or directory itself
+	metaPath := job.PrebuiltIndexPath + ".meta"
+	if _, err := os.Stat(metaPath); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("prebuilt index not found at %s", job.PrebuiltIndexPath)
+			return fmt.Errorf("prebuilt index not found at %s (checked for %s)", job.PrebuiltIndexPath, metaPath)
 		}
-		return fmt.Errorf("failed to stat prebuilt index at %s: %w", job.PrebuiltIndexPath, err)
+		return fmt.Errorf("failed to stat prebuilt index at %s: %w", metaPath, err)
 	}
 
 	// Execute IMPORT TABLE

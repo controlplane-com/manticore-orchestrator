@@ -803,16 +803,19 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 	// Build full path and validate CSV exists (skip for prebuilt index imports)
 	var csvFullPath string
 	if req.PrebuiltIndexPath != "" {
-		// Prebuilt index: validate the index path exists instead
-		if _, err := os.Stat(req.PrebuiltIndexPath); err != nil {
+		// Prebuilt index: validate the index path exists by checking for the .meta file
+		// Manticore indexes are stored as multiple files with a common prefix (e.g., table.meta, table.0.spa, etc.)
+		// The PrebuiltIndexPath is the prefix, not a file or directory itself
+		metaPath := req.PrebuiltIndexPath + ".meta"
+		if _, err := os.Stat(metaPath); err != nil {
 			if os.IsNotExist(err) {
-				errorResponse(w, http.StatusBadRequest, fmt.Sprintf("prebuilt index not found: %s", req.PrebuiltIndexPath))
+				errorResponse(w, http.StatusBadRequest, fmt.Sprintf("prebuilt index not found: %s (checked for %s)", req.PrebuiltIndexPath, metaPath))
 				return
 			}
 			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat prebuilt index: %v", err))
 			return
 		}
-		slog.Debug("using prebuilt index", "path", req.PrebuiltIndexPath)
+		slog.Debug("using prebuilt index", "path", req.PrebuiltIndexPath, "metaFile", metaPath)
 	} else {
 		// Bulk import: validate CSV exists
 		csvFullPath = filepath.Join(h.s3Mount, req.CSVPath)
