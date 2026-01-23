@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql, StandardSQL } from '@codemirror/lang-sql';
 import { keymap } from '@codemirror/view';
@@ -52,19 +52,22 @@ export const SqlEditor = ({
     onChange('');
   }, [onChange]);
 
-  // Ctrl/Cmd+Enter to execute
-  const executeKeymap = keymap.of([
-    {
-      key: 'Ctrl-Enter',
-      mac: 'Cmd-Enter',
-      run: () => {
-        if (!disabled) {
-          onExecute();
-        }
-        return true;
-      },
-    },
-  ]);
+  // Ctrl/Cmd+Enter to execute (Mod = Ctrl on Windows/Linux, Cmd on Mac)
+  const executeKeymap = useMemo(
+    () =>
+      keymap.of([
+        {
+          key: 'Mod-Enter',
+          run: () => {
+            if (!disabled) {
+              onExecute();
+            }
+            return true;
+          },
+        },
+      ]),
+    [disabled, onExecute]
+  );
 
   return (
     <div className="space-y-3">
