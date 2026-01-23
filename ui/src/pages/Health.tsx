@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '../components/PageHeader';
 import { Card } from '../components/Card';
@@ -197,9 +198,14 @@ export const Health = () => {
     refetchInterval: 60000,
   });
 
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
   const handleRefresh = () => {
+    setIsRefreshing(true);
     refetchCluster();
     refetchStatus();
+    // Reset animation after a short delay
+    setTimeout(() => setIsRefreshing(false), 600);
   };
 
   if (clusterLoading && statusLoading) {
@@ -216,7 +222,7 @@ export const Health = () => {
         description="Cluster health and status monitoring"
         actions={
           <Button variant="secondary" onClick={handleRefresh}>
-            <ArrowPathIcon className="h-4 w-4 mr-2" />
+            <ArrowPathIcon className={`h-4 w-4 mr-2 transition-transform duration-500 ${isRefreshing ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
         }

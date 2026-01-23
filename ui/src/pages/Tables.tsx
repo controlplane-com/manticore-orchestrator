@@ -260,6 +260,15 @@ export const Tables = () => {
     setSchemaModal({ isOpen: false, tableName: '' });
   };
 
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = () => {
+    setIsRefreshing(true);
+    refetchTables();
+    // Reset animation after a short delay
+    setTimeout(() => setIsRefreshing(false), 600);
+  };
+
   if (tablesLoading && configLoading) {
     return <LoadingPage message="Loading tables..." />;
   }
@@ -284,8 +293,8 @@ export const Tables = () => {
         title="Tables"
         description="Manage Manticore search tables"
         actions={
-          <Button variant="secondary" onClick={() => refetchTables()}>
-            <ArrowPathIcon className="h-4 w-4 mr-2" />
+          <Button variant="secondary" onClick={handleRefresh}>
+            <ArrowPathIcon className={`h-4 w-4 mr-2 transition-transform duration-500 ${isRefreshing ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
         }
