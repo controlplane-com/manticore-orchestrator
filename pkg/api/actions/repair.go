@@ -83,15 +83,36 @@ func Repair(ctx *Context) error {
 		replicas[i] = getReplicaInfo(i, c)
 	}
 
-	// Step 2: Check for quorum
+	// Step 2: Check for quorum - if cluster is healthy, skip repair
 	var quorumReplicas []int
+	var reachableCount int
+	var quorumUUIDs = make(map[string]bool)
 	for i, r := range replicas {
-		if r.Reachable && r.Health != nil && r.Health.ClusterStatus == "primary" {
-			quorumReplicas = append(quorumReplicas, i)
+		if r.Reachable {
+			reachableCount++
+			if r.Health != nil && r.Health.ClusterStatus == "primary" {
+				quorumReplicas = append(quorumReplicas, i)
+				// Track UUIDs to detect split-brain
+				if r.Grastate != nil && r.Grastate.UUID != "" {
+					quorumUUIDs[r.Grastate.UUID] = true
+				}
+			}
 		}
 	}
 
-	// Step 3: Use shared cluster logic to find winning cluster and source
+	// Step 3: If all reachable replicas have quorum AND same UUID (no split-brain), cluster is healthy - cancel repair
+	if reachableCount > 0 && len(quorumReplicas) == reachableCount {
+		// Check for split-brain: if multiple UUIDs exist, it's split-brain and repair is needed
+		if len(quorumUUIDs) > 1 {
+			slog.Debug("split-brain detected (multiple UUIDs in quorum replicas), proceeding with repair", "uuids", quorumUUIDs)
+			// Continue with repair - don't cancel
+		} else {
+			// All replicas are "primary" with same UUID (or no UUIDs) - cluster is healthy
+			return fmt.Errorf("cluster is healthy (all %d reachable replicas have quorum: %v), cancelling repair", reachableCount, quorumReplicas)
+		}
+	}
+
+	// Step 4: Use shared cluster logic to find winning cluster and source
 	sharedReplicas := toSharedReplicaInfo(replicas)
 	clusterDesc := cluster.FindWinningCluster(sharedReplicas, "", "") // workloadName/port not needed for repair
 
@@ -116,18 +137,39 @@ func RepairWithSource(ctx *Context, sourceReplica int) error {
 		return fmt.Errorf("invalid source replica %d (have %d replicas)", sourceReplica, len(ctx.Clients))
 	}
 
-	// Collect basic info about replicas
+	// Collect basic info about replicas (including grastate for UUID check)
 	replicas := make([]ReplicaInfo, len(ctx.Clients))
 	for i, c := range ctx.Clients {
-		replicas[i] = ReplicaInfo{Index: i}
-		health, err := c.Health(0)
-		if err != nil {
-			slog.Debug("replica health check failed", "replica", i, "error", err)
-			replicas[i].Reachable = false
-			continue
+		replicas[i] = getReplicaInfo(i, c)
+	}
+
+	// Check for quorum - if cluster is healthy, skip repair
+	var quorumReplicas []int
+	var reachableCount int
+	var quorumUUIDs = make(map[string]bool)
+	for i, r := range replicas {
+		if r.Reachable {
+			reachableCount++
+			if r.Health != nil && r.Health.ClusterStatus == "primary" {
+				quorumReplicas = append(quorumReplicas, i)
+				// Track UUIDs to detect split-brain
+				if r.Grastate != nil && r.Grastate.UUID != "" {
+					quorumUUIDs[r.Grastate.UUID] = true
+				}
+			}
 		}
-		replicas[i].Reachable = true
-		replicas[i].Health = health
+	}
+
+	// If all reachable replicas have quorum AND same UUID (no split-brain), cluster is healthy - cancel repair
+	if reachableCount > 0 && len(quorumReplicas) == reachableCount {
+		// Check for split-brain: if multiple UUIDs exist, it's split-brain and repair is needed
+		if len(quorumUUIDs) > 1 {
+			slog.Debug("split-brain detected (multiple UUIDs in quorum replicas), proceeding with repair", "uuids", quorumUUIDs)
+			// Continue with repair - don't cancel
+		} else {
+			// All replicas are "primary" with same UUID (or no UUIDs) - cluster is healthy
+			return fmt.Errorf("cluster is healthy (all %d reachable replicas have quorum: %v), cancelling repair", reachableCount, quorumReplicas)
+		}
 	}
 
 	return repairFromSource(ctx, replicas, sourceReplica)
