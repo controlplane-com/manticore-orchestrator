@@ -131,6 +131,22 @@ func (c *AgentClient) Health(maxRetries int) (*types.HealthResponse, error) {
 	return &resp, nil
 }
 
+// QueryCount returns the number of queries processed by the Manticore instance on this replica
+func (c *AgentClient) QueryCount(maxRetries int) (int64, error) {
+	body, err := c.doRequest("GET", "/api/metrics/query-count", nil, maxRetries)
+	if err != nil {
+		return 0, err
+	}
+
+	var resp struct {
+		QueryCount int64 `json:"queryCount"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return resp.QueryCount, nil
+}
+
 // HealthProbe does a single health check without retries to quickly determine if a replica exists.
 // Returns error if the replica returns 503 (pod doesn't exist) or is unreachable.
 func (c *AgentClient) HealthProbe() (*types.HealthResponse, error) {

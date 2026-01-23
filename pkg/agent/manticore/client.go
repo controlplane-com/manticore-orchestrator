@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -301,4 +302,41 @@ func (c *Client) DescribeTable(tableName string) ([]schema.ColumnSchema, error) 
 		columns = append(columns, col)
 	}
 	return columns, nil
+}
+
+// GetQueryCount fetches the manticore_queries_count metric from the /metrics endpoint
+func (c *Client) GetQueryCount() (int64, error) {
+	url := fmt.Sprintf("http://%s:%s/metrics", c.host, c.httpPort)
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch metrics: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("metrics endpoint returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read metrics response: %w", err)
+	}
+
+	// Parse metrics format: manticore_queries_count 12345
+	lines := strings.Split(string(body), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "manticore_queries_count") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				count, err := strconv.ParseInt(parts[1], 10, 64)
+				if err != nil {
+					return 0, fmt.Errorf("failed to parse query count: %w", err)
+				}
+				return count, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("manticore_queries_count not found in metrics")
 }

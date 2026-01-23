@@ -220,6 +220,7 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/config", server.handleConfig)
 	mux.HandleFunc("/api/cluster", server.handleCluster)
 	mux.HandleFunc("/api/cluster/discover", server.handleClusterDiscover)
+	mux.HandleFunc("/api/cluster/query-counts", server.handleClusterQueryCounts)
 	mux.HandleFunc("/api/tables/status", server.handleTablesStatus)
 	mux.HandleFunc("/api/tables/", server.handleTableSchema)
 	mux.HandleFunc("/api/imports", server.handleImports)
@@ -534,6 +535,58 @@ func buildDeploymentMessage(version cpln.DeploymentVersion) string {
 	}
 
 	return strings.Join(messages, "\n")
+}
+
+// QueryCountResponse represents query count for a single replica
+type QueryCountResponse struct {
+	Index     int    `json:"index"`
+	Endpoint  string `json:"endpoint"`
+	QueryCount *int64 `json:"queryCount,omitempty"`
+	Error     *string `json:"error,omitempty"`
+}
+
+// handleClusterQueryCounts handles GET /api/cluster/query-counts - returns query counts for all replicas
+func (s *Server) handleClusterQueryCounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	replicaCount, err := s.getReplicaCount()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get replica count: %v", err))
+		return
+	}
+
+	clients := s.buildClients(replicaCount)
+	results := make([]QueryCountResponse, len(clients))
+
+	var wg sync.WaitGroup
+	for i, c := range clients {
+		wg.Add(1)
+		go func(idx int, agentClient *client.AgentClient) {
+			defer wg.Done()
+
+			result := QueryCountResponse{
+				Index:    idx,
+				Endpoint: agentClient.BaseURL(),
+			}
+
+			count, err := agentClient.QueryCount(1) // No retries for REST API
+			if err != nil {
+				errMsg := err.Error()
+				result.Error = &errMsg
+			} else {
+				result.QueryCount = &count
+			}
+
+			results[idx] = result
+		}(i, c)
+	}
+	wg.Wait()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
 }
 
 // ClusterDiscoverResponse represents the response for /api/cluster/discover

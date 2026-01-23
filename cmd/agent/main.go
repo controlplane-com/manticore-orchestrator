@@ -154,6 +154,7 @@ func main() {
 	api.HandleFunc("/health", h.Health).Methods("GET")
 	api.HandleFunc("/ready", h.Ready).Methods("GET")
 	api.HandleFunc("/grastate", h.Grastate).Methods("GET")
+	api.HandleFunc("/metrics/query-count", h.QueryCount).Methods("GET")
 	api.HandleFunc("/tables", h.ListTables).Methods("GET")
 	// Table-specific endpoints (must be before PathPrefix to match first)
 	api.PathPrefix("/tables/").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

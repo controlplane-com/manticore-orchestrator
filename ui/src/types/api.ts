@@ -195,3 +195,14 @@ export interface SqlReplicaResult {
 export interface SqlBroadcastResponse extends ApiResponse {
   results: SqlReplicaResult[];
 }
+
+// Query count for a single replica
+export interface QueryCountEntry {
+  index: number;
+  endpoint: string;
+  queryCount?: number;
+  error?: string;
+}
+
+// Query counts response from /api/cluster/query-counts
+export interface QueryCountsResponse extends Array<QueryCountEntry> {}

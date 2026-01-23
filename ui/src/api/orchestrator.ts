@@ -14,6 +14,7 @@ import type {
   SqlQueryRequest,
   SqlQueryResponse,
   SqlBroadcastResponse,
+  QueryCountsResponse,
 } from '../types/api';
 
 const api = axios.create({
@@ -59,6 +60,12 @@ export const getCluster = async (): Promise<ClusterResponse> => {
 // Get cluster discovery info including split-brain detection (authenticated)
 export const getClusterDiscovery = async (): Promise<ClusterDiscoveryResponse> => {
   const response = await api.get('/cluster/discover');
+  return response.data;
+};
+
+// Get query counts for all replicas (authenticated)
+export const getQueryCounts = async (): Promise<QueryCountsResponse> => {
+  const response = await api.get('/cluster/query-counts');
   return response.data;
 };
 

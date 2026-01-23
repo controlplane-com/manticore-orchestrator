@@ -78,6 +78,19 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, response)
 }
 
+// QueryCount returns the number of queries processed by this Manticore instance
+func (h *Handler) QueryCount(w http.ResponseWriter, r *http.Request) {
+	count, err := h.client.GetQueryCount()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to get query count: %v", err))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"queryCount": count,
+	})
+}
+
 // GrastateInfo holds parsed grastate.dat information
 type GrastateInfo struct {
 	UUID            string

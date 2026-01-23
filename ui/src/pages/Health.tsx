@@ -5,7 +5,7 @@ import { Card } from '../components/Card';
 import { Badge } from '../components/Badge';
 import { LoadingSpinner, LoadingPage } from '../components/LoadingSpinner';
 import { Button } from '../components/Button';
-import { getStatus, getCluster, getConfig } from '../api/orchestrator';
+import { getStatus, getCluster, getConfig, getQueryCounts } from '../api/orchestrator';
 import type { ReplicaStatus } from '../types/api';
 import {
   HeartIcon,
@@ -198,12 +198,23 @@ export const Health = () => {
     refetchInterval: 60000,
   });
 
+  const {
+    data: queryCountsData,
+    isLoading: queryCountsLoading,
+    refetch: refetchQueryCounts,
+  } = useQuery({
+    queryKey: ['queryCounts'],
+    queryFn: getQueryCounts,
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const handleRefresh = () => {
     setIsRefreshing(true);
     refetchCluster();
     refetchStatus();
+    refetchQueryCounts();
     // Reset animation after a short delay
     setTimeout(() => setIsRefreshing(false), 600);
   };
@@ -354,6 +365,67 @@ export const Health = () => {
         ) : (
           <div className="text-center py-8 text-gray-500 dark:text-gray-400">
             No replicas found
+          </div>
+        )}
+      </div>
+
+      {/* Query Counts */}
+      <div className="mb-8">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+          Query Counts
+        </h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Number of queries processed by each replica. This helps verify load balancing is working correctly.
+        </p>
+
+        {queryCountsLoading ? (
+          <div className="flex justify-center py-8">
+            <LoadingSpinner size="lg" />
+          </div>
+        ) : queryCountsData?.length ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {queryCountsData.map((entry) => (
+              <Card key={entry.index} className="p-4">
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-cpln-cyan/10">
+                      <ServerIcon className="h-6 w-6 text-cpln-cyan" />
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-gray-900 dark:text-white">
+                        Replica {entry.index}
+                      </h4>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 font-mono truncate max-w-[200px]" title={entry.endpoint}>
+                        {entry.endpoint.replace('http://', '').split(':')[0]}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {entry.error ? (
+                    <div className="p-2 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-600 dark:text-red-400">
+                      {entry.error}
+                    </div>
+                  ) : entry.queryCount !== undefined ? (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-500 dark:text-gray-400">Queries</span>
+                      <span className="text-xl font-semibold text-gray-900 dark:text-white">
+                        {entry.queryCount.toLocaleString()}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-gray-500 dark:text-gray-400">
+                      No data available
+                    </div>
+                  )}
+                </div>
+              </Card>
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            No query count data available
           </div>
         )}
       </div>
