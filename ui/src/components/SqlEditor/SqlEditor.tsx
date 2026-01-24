@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { sql, StandardSQL } from '@codemirror/lang-sql';
 import { keymap } from '@codemirror/view';
@@ -52,25 +52,56 @@ export const SqlEditor = ({
     onChange('');
   }, [onChange]);
 
+  const containerRef = useRef<HTMLDivElement>(null);
+
   // Ctrl/Cmd+Enter to execute (Mod = Ctrl on Windows/Linux, Cmd on Mac)
   const executeKeymap = useMemo(
     () =>
       keymap.of([
         {
           key: 'Mod-Enter',
+          preventDefault: true,
           run: () => {
-            if (!disabled) {
+            if (!disabled && value.trim()) {
               onExecute();
             }
             return true;
           },
         },
       ]),
-    [disabled, onExecute]
+    [disabled, onExecute, value]
   );
 
+  // Add direct keyboard event listener as fallback
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Check for Ctrl+Enter (Windows/Linux) or Cmd+Enter (Mac)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        // Only handle if the CodeMirror editor is focused
+        const activeElement = document.activeElement;
+        const isEditorFocused = 
+          activeElement?.closest('.cm-editor') !== null ||
+          activeElement?.classList.contains('cm-content') ||
+          activeElement?.closest('.cm-content') !== null;
+        
+        if (isEditorFocused) {
+          if (!disabled && value.trim()) {
+            e.preventDefault();
+            e.stopPropagation();
+            onExecute();
+          }
+        }
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown, true); // Use capture phase
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [disabled, onExecute, value]);
+
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" ref={containerRef}>
       <div className="border border-gray-300 dark:border-stone-600 rounded-lg overflow-hidden">
         <CodeMirror
           value={value}
