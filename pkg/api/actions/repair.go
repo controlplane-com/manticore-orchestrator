@@ -197,11 +197,17 @@ func repairFromSource(ctx *Context, replicas []ReplicaInfo, sourceReplica int) e
 		slog.Debug("cluster bootstrapped", "replica", sourceReplica)
 	}
 
+	// Get source replica's UUID for comparison
+	sourceUUID := ""
+	if replicas[sourceReplica].Grastate != nil {
+		sourceUUID = replicas[sourceReplica].Grastate.UUID
+	}
+
 	// Get source replica's replication address
 	sourceAddr := deriveReplicationAddr(source.BaseURL())
 	slog.Debug("source replication address", "addr", sourceAddr)
 
-	// Force all other replicas to rejoin via source
+	// Force all other replicas to rejoin via source (skip if already in same cluster)
 	for i, c := range ctx.Clients {
 		if i == sourceReplica {
 			slog.Debug("skipping source replica", "replica", i)
@@ -210,6 +216,21 @@ func repairFromSource(ctx *Context, replicas []ReplicaInfo, sourceReplica int) e
 
 		if !replicas[i].Reachable {
 			slog.Warn("replica not reachable, skipping", "replica", i)
+			continue
+		}
+
+		// Check if replica is already in the same cluster
+		replicaHealth := replicas[i].Health
+		replicaUUID := ""
+		if replicas[i].Grastate != nil {
+			replicaUUID = replicas[i].Grastate.UUID
+		}
+
+		// Skip rejoin if replica is already "primary" or "synced" with same UUID as source
+		if replicaHealth != nil &&
+			(replicaHealth.ClusterStatus == "primary" || replicaHealth.ClusterStatus == "synced") &&
+			sourceUUID != "" && replicaUUID == sourceUUID {
+			slog.Debug("replica already in same cluster, skipping rejoin", "replica", i, "status", replicaHealth.ClusterStatus, "uuid", replicaUUID)
 			continue
 		}
 
