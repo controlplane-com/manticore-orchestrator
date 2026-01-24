@@ -100,15 +100,15 @@ func Repair(ctx *Context) error {
 		}
 	}
 
-	// Step 3: If all reachable replicas have quorum AND same UUID (no split-brain), cluster is healthy - cancel repair
+	// Step 3: Check for split-brain - if multiple UUIDs exist, proceed with repair
+	// Note: We no longer cancel repair if cluster is healthy - user can override if desired
 	if reachableCount > 0 && len(quorumReplicas) == reachableCount {
-		// Check for split-brain: if multiple UUIDs exist, it's split-brain and repair is needed
 		if len(quorumUUIDs) > 1 {
 			slog.Debug("split-brain detected (multiple UUIDs in quorum replicas), proceeding with repair", "uuids", quorumUUIDs)
-			// Continue with repair - don't cancel
+			// Continue with repair - split-brain detected
 		} else {
-			// All replicas are "primary" with same UUID (or no UUIDs) - cluster is healthy
-			return fmt.Errorf("cluster is healthy (all %d reachable replicas have quorum: %v), cancelling repair", reachableCount, quorumReplicas)
+			slog.Debug("cluster appears healthy (all reachable replicas have quorum), but proceeding with repair as requested", "replicas", quorumReplicas)
+			// Continue with repair - user requested it
 		}
 	}
 
@@ -160,15 +160,15 @@ func RepairWithSource(ctx *Context, sourceReplica int) error {
 		}
 	}
 
-	// If all reachable replicas have quorum AND same UUID (no split-brain), cluster is healthy - cancel repair
+	// Check for split-brain - if multiple UUIDs exist, proceed with repair
+	// Note: We no longer cancel repair if cluster is healthy - user can override if desired
 	if reachableCount > 0 && len(quorumReplicas) == reachableCount {
-		// Check for split-brain: if multiple UUIDs exist, it's split-brain and repair is needed
 		if len(quorumUUIDs) > 1 {
 			slog.Debug("split-brain detected (multiple UUIDs in quorum replicas), proceeding with repair", "uuids", quorumUUIDs)
-			// Continue with repair - don't cancel
+			// Continue with repair - split-brain detected
 		} else {
-			// All replicas are "primary" with same UUID (or no UUIDs) - cluster is healthy
-			return fmt.Errorf("cluster is healthy (all %d reachable replicas have quorum: %v), cancelling repair", reachableCount, quorumReplicas)
+			slog.Debug("cluster appears healthy (all reachable replicas have quorum), but proceeding with repair as requested", "replicas", quorumReplicas)
+			// Continue with repair - user requested it
 		}
 	}
 

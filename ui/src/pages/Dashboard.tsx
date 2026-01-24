@@ -17,8 +17,6 @@ import {
   ServerStackIcon,
   ExclamationTriangleIcon,
   ClockIcon,
-  ChevronDownIcon,
-  ChevronUpIcon,
 } from '@heroicons/react/24/outline';
 
 export const Dashboard = () => {
@@ -26,7 +24,6 @@ export const Dashboard = () => {
   const queryClient = useQueryClient();
   const [selectedTable, setSelectedTable] = useState('');
   const [selectedSourceReplica, setSelectedSourceReplica] = useState('');
-  const [expandedMessages, setExpandedMessages] = useState<Set<string>>(new Set());
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     action: 'import' | 'repair';
@@ -426,73 +423,41 @@ export const Dashboard = () => {
             <p className="text-sm text-gray-500 dark:text-gray-400">No commands have been run yet.</p>
           ) : (
             <div className="space-y-2">
-              {commandHistoryData?.commands?.slice(0, 15).map((cmd) => {
-                const isExpanded = expandedMessages.has(cmd.id);
-                const hasMessage = cmd.message && cmd.message.trim() !== '';
-                
-                return (
-                  <div key={cmd.id}>
-                    <div className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-stone-700 rounded">
-                      <div className="flex items-center gap-3">
-                        <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                          {new Date(cmd.created).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z')}
-                        </span>
-                        <Badge variant={cmd.action === 'import' ? 'info' : 'warning'}>
-                          {cmd.action}
-                        </Badge>
-                        <span className="font-medium text-gray-900 dark:text-white">
-                          {cmd.action === 'import'
-                            ? cmd.tableName
-                            : `Replica ${cmd.sourceReplica ?? 'auto'}`}
-                        </span>
-                        <span className="text-xs text-gray-400 font-mono">{cmd.id}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge
-                          variant={
-                            cmd.lifecycleStage === 'completed'
-                              ? 'success'
-                              : cmd.lifecycleStage === 'failed'
-                              ? 'error'
-                              : 'info'
-                          }
-                        >
-                          {(cmd.lifecycleStage === 'running' || cmd.lifecycleStage === 'pending') && (
-                            <ArrowPathIcon className="h-3 w-3 mr-1 animate-spin" />
-                          )}
-                          {cmd.lifecycleStage}
-                        </Badge>
-                        {hasMessage && (
-                          <button
-                            onClick={() => {
-                              const newExpanded = new Set(expandedMessages);
-                              if (isExpanded) {
-                                newExpanded.delete(cmd.id);
-                              } else {
-                                newExpanded.add(cmd.id);
-                              }
-                              setExpandedMessages(newExpanded);
-                            }}
-                            className="p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
-                            title={isExpanded ? 'Hide message' : 'Show message'}
-                          >
-                            {isExpanded ? (
-                              <ChevronUpIcon className="h-4 w-4" />
-                            ) : (
-                              <ChevronDownIcon className="h-4 w-4" />
-                            )}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {hasMessage && isExpanded && (
-                      <div className="mt-1 px-3 py-2 bg-red-50 dark:bg-red-900/20 rounded text-sm text-red-700 dark:text-red-300 whitespace-pre-wrap">
-                        {cmd.message}
-                      </div>
-                    )}
+              {commandHistoryData?.commands?.slice(0, 15).map((cmd) => (
+                <div
+                  key={cmd.id}
+                  className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-stone-700 rounded"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                      {new Date(cmd.created).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z')}
+                    </span>
+                    <Badge variant={cmd.action === 'import' ? 'info' : 'warning'}>
+                      {cmd.action}
+                    </Badge>
+                    <span className="font-medium text-gray-900 dark:text-white">
+                      {cmd.action === 'import'
+                        ? cmd.tableName
+                        : `Replica ${cmd.sourceReplica ?? 'auto'}`}
+                    </span>
+                    <span className="text-xs text-gray-400 font-mono">{cmd.id}</span>
                   </div>
-                );
-              })}
+                  <Badge
+                    variant={
+                      cmd.lifecycleStage === 'completed'
+                        ? 'success'
+                        : cmd.lifecycleStage === 'failed'
+                        ? 'error'
+                        : 'info'
+                    }
+                  >
+                    {(cmd.lifecycleStage === 'running' || cmd.lifecycleStage === 'pending') && (
+                      <ArrowPathIcon className="h-3 w-3 mr-1 animate-spin" />
+                    )}
+                    {cmd.lifecycleStage}
+                  </Badge>
+                </div>
+              ))}
             </div>
           )}
         </Card>
