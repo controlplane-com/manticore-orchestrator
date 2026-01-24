@@ -574,8 +574,13 @@ func (s *Server) handleClusterQueryCounts(w http.ResponseWriter, r *http.Request
 
 			count, err := agentClient.QueryCount(1) // No retries for REST API
 			if err != nil {
-				errMsg := err.Error()
-				result.Error = &errMsg
+				// Use same logic as replica status - don't show error for "not_in_use" replicas
+				status, _ := classifyReplicaError(err)
+				if status != "not_in_use" {
+					errMsg := err.Error()
+					result.Error = &errMsg
+				}
+				// If status is "not_in_use", leave Error as nil (don't display error)
 			} else {
 				result.QueryCount = &count
 			}
