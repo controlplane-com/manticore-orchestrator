@@ -139,6 +139,7 @@ export interface CommandHistoryEntry {
   sourceReplica?: number; // only for repairs
   lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
   created: string; // ISO timestamp
+  message?: string; // Error or status message
 }
 
 // Command history response from /api/commands

@@ -1259,6 +1259,26 @@ func (s *Server) handleRepairs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// extractMessageFromCommand extracts the message from a command's status field
+func extractMessageFromCommand(cmd cpln.Command) *string {
+	if cmd.Status == nil {
+		return nil
+	}
+	
+	// Check for common message fields in status
+	if msg, ok := cmd.Status["message"].(string); ok && msg != "" {
+		return &msg
+	}
+	if msg, ok := cmd.Status["error"].(string); ok && msg != "" {
+		return &msg
+	}
+	if msg, ok := cmd.Status["errorMessage"].(string); ok && msg != "" {
+		return &msg
+	}
+	
+	return nil
+}
+
 // extractSourceReplicaFromCommand extracts the REPAIR_SOURCE_REPLICA env var from a runCronWorkload command
 func extractSourceReplicaFromCommand(cmd cpln.Command) *int {
 	overrides, ok := cmd.Spec["containerOverrides"].([]interface{})
@@ -1293,12 +1313,13 @@ func extractSourceReplicaFromCommand(cmd cpln.Command) *int {
 
 // CommandHistoryEntry represents a command in the history
 type CommandHistoryEntry struct {
-	ID             string `json:"id"`
-	Action         string `json:"action"`                  // "import" or "repair"
-	TableName      string `json:"tableName,omitempty"`     // only for imports
-	SourceReplica  *int   `json:"sourceReplica,omitempty"` // only for repairs
-	LifecycleStage string `json:"lifecycleStage"`
-	Created        string `json:"created"` // ISO timestamp for sorting
+	ID             string  `json:"id"`
+	Action         string  `json:"action"`                  // "import" or "repair"
+	TableName      string  `json:"tableName,omitempty"`     // only for imports
+	SourceReplica  *int    `json:"sourceReplica,omitempty"`  // only for repairs
+	LifecycleStage string  `json:"lifecycleStage"`
+	Created        string  `json:"created"`                 // ISO timestamp for sorting
+	Message        *string `json:"message,omitempty"`         // Error or status message
 }
 
 // CommandHistoryResponse represents the response for /api/commands
@@ -1337,6 +1358,8 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 		action := extractActionFromCommand(cmd)
 
 		// Include both import and repair commands
+		message := extractMessageFromCommand(cmd)
+		
 		if action == "import" {
 			tableName := extractTableNameFromCommand(cmd)
 			if tableName == "" {
@@ -1348,6 +1371,7 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 				TableName:      tableName,
 				LifecycleStage: cmd.LifecycleStage,
 				Created:        cmd.Created,
+				Message:        message,
 			})
 		} else if action == "repair" {
 			sourceReplica := extractSourceReplicaFromCommand(cmd)
@@ -1357,6 +1381,7 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 				SourceReplica:  sourceReplica,
 				LifecycleStage: cmd.LifecycleStage,
 				Created:        cmd.Created,
+				Message:        message,
 			})
 		}
 	}
@@ -1607,6 +1632,9 @@ func runCLI(config Config) {
 
 	if actionErr != nil {
 		slog.Error("action failed", "action", action, "error", actionErr)
+		// Write error message to stderr in a format that might be captured by CPLN
+		// Format: ORCHESTRATOR_ERROR_MESSAGE: <error message>
+		fmt.Fprintf(os.Stderr, "ORCHESTRATOR_ERROR_MESSAGE: %s\n", actionErr.Error())
 		os.Exit(1)
 	}
 
