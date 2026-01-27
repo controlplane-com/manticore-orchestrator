@@ -3,6 +3,7 @@ REGISTRY ?= ghcr.io/cuppojoe
 API_IMAGE ?= $(REGISTRY)/manticore-cpln-api
 AGENT_IMAGE ?= $(REGISTRY)/manticore-cpln-agent
 UI_IMAGE ?= $(REGISTRY)/manticore-cpln-ui
+BACKUP_IMAGE ?= $(REGISTRY)/manticore-cpln-backup
 
 # Version can be overridden: make build-all VERSION=v1.0.0
 VERSION ?= latest
@@ -10,7 +11,7 @@ VERSION ?= latest
 # Platform for cross-compilation (default to amd64 for cloud deployments)
 PLATFORM ?= linux/amd64
 
-.PHONY: help build-api build-agent build-ui build-all push-api push-agent push-ui push-all clean
+.PHONY: help build-api build-agent build-ui build-backup build-all push-api push-agent push-ui push-backup push-all clean
 
 help: ## Show this help
 	@echo "Manticore Build Targets"
@@ -41,7 +42,12 @@ build-ui: ## Build UI image
 	docker buildx build --platform $(PLATFORM) -f ./build/ui/Dockerfile -t $(UI_IMAGE):$(VERSION) --load ./ui
 	@echo "Built $(UI_IMAGE):$(VERSION)"
 
-build-all: build-api build-agent build-ui ## Build all images
+build-backup: ## Build backup image
+	@echo "Building $(BACKUP_IMAGE):$(VERSION) for $(PLATFORM)"
+	docker buildx build --platform $(PLATFORM) -f ./backup/Dockerfile -t $(BACKUP_IMAGE):$(VERSION) --load ./backup
+	@echo "Built $(BACKUP_IMAGE):$(VERSION)"
+
+build-all: build-api build-agent build-ui build-backup ## Build all images
 
 # Push targets
 push-api: ## Push API image to registry
@@ -59,7 +65,12 @@ push-ui: ## Push UI image to registry
 	docker push $(UI_IMAGE):$(VERSION)
 	@echo "Pushed $(UI_IMAGE):$(VERSION)"
 
-push-all: push-api push-agent push-ui ## Push all images to registry
+push-backup: ## Push backup image to registry
+	@echo "Pushing $(BACKUP_IMAGE):$(VERSION)"
+	docker push $(BACKUP_IMAGE):$(VERSION)
+	@echo "Pushed $(BACKUP_IMAGE):$(VERSION)"
+
+push-all: push-api push-agent push-ui push-backup ## Push all images to registry
 
 # Combined build and push
 release-api: build-api push-api ## Build and push API image
@@ -67,6 +78,8 @@ release-api: build-api push-api ## Build and push API image
 release-agent: build-agent push-agent ## Build and push agent image
 
 release-ui: build-ui push-ui ## Build and push UI image
+
+release-backup: build-backup push-backup ## Build and push backup image
 
 release-all: build-all push-all ## Build and push all images
 
