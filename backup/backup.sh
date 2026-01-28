@@ -66,13 +66,23 @@ elif [ "${ACTION}" = "restore" ]; then
   # Decompress backup
   gunzip /tmp/restore.sql.gz
 
+  # Clustered tables require cluster:table format
+  CLUSTER_NAME="${CLUSTER_NAME:-manticore}"
+  CLUSTER_TABLE="${CLUSTER_NAME}:${DELTA_TABLE}"
+
   # Clear existing data from the delta table first
   # Note: TRUNCATE doesn't work on clustered tables, so we use DELETE
-  echo "[INFO] Clearing existing data from ${DELTA_TABLE}"
+  echo "[INFO] Clearing existing data from ${CLUSTER_TABLE}"
   mysql \
     --host="${MANTICORE_HOST}" \
     --port="${MANTICORE_PORT:-9306}" \
-    -e "DELETE FROM ${DELTA_TABLE} WHERE id > 0"
+    -e "DELETE FROM ${CLUSTER_TABLE} WHERE id > 0"
+
+  # Replace table name with cluster-prefixed version in the SQL file
+  # mysqldump outputs: INSERT INTO `tablename` ...
+  # We need: INSERT INTO `cluster:tablename` ...
+  echo "[INFO] Adding cluster prefix to SQL statements"
+  sed -i "s/INSERT INTO \`${DELTA_TABLE}\`/INSERT INTO \`${CLUSTER_TABLE}\`/g" /tmp/restore.sql
 
   # Restore to Manticore delta table
   # The backup contains only INSERT statements (no DROP/CREATE)
