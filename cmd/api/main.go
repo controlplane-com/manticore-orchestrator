@@ -263,7 +263,7 @@ func (s *Server) getBackupWorkload() string {
 	if s.config.BackupWorkload != "" {
 		return s.config.BackupWorkload
 	}
-	return strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-backup"
+	return s.config.WorkloadName + "-backup"
 }
 
 // getReplicaCount fetches the replica count from Control Plane API
