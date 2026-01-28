@@ -3,12 +3,14 @@ import type {
   ApiResponse,
   ImportRequest,
   RepairRequest,
+  BackupRequest,
   ConfigResponse,
   ClusterResponse,
   ClusterDiscoveryResponse,
   TablesStatusResponse,
   TableSchemaResponse,
   ImportsResponse,
+  BackupsResponse,
   RepairsResponse,
   CommandHistoryResponse,
   SqlQueryRequest,
@@ -96,6 +98,18 @@ export const getTableSchema = async (tableName: string): Promise<TableSchemaResp
 // Get active import operations (authenticated)
 export const getImports = async (): Promise<ImportsResponse> => {
   const response = await api.get('/imports');
+  return response.data;
+};
+
+// Backup a table's delta (authenticated)
+export const backupTable = async (request: BackupRequest): Promise<ApiResponse> => {
+  const response = await api.post('/backup', request);
+  return response.data;
+};
+
+// Get active backup operations (authenticated)
+export const getBackups = async (): Promise<BackupsResponse> => {
+  const response = await api.get('/backups');
   return response.data;
 };
 

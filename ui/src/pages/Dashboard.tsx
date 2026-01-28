@@ -8,7 +8,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner';
 import { FormSelect } from '../components/FormSelect';
 import { ConfirmActionModal } from '../components/ConfirmActionModal';
 import { useToast } from '../hooks/useToast';
-import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getRepairs, getCommandHistory, importTable, repairCluster } from '../api/orchestrator';
+import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster } from '../api/orchestrator';
 import {
   HeartIcon,
   TableCellsIcon,
@@ -17,6 +17,7 @@ import {
   ServerStackIcon,
   ExclamationTriangleIcon,
   ClockIcon,
+  CloudArrowUpIcon,
 } from '@heroicons/react/24/outline';
 
 export const Dashboard = () => {
@@ -24,9 +25,10 @@ export const Dashboard = () => {
   const queryClient = useQueryClient();
   const [selectedTable, setSelectedTable] = useState('');
   const [selectedSourceReplica, setSelectedSourceReplica] = useState('');
+  const [selectedBackupTable, setSelectedBackupTable] = useState('');
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
-    action: 'import' | 'repair';
+    action: 'import' | 'repair' | 'backup';
     title: string;
     message: string;
   }>({ isOpen: false, action: 'import', title: '', message: '' });
@@ -81,15 +83,26 @@ export const Dashboard = () => {
     },
   });
 
+  // Fetch active backups with dynamic polling
+  const { data: backupsData } = useQuery({
+    queryKey: ['backups'],
+    queryFn: getBackups,
+    refetchInterval: (query) => {
+      const hasActiveBackups = (query.state.data?.backups?.length ?? 0) > 0;
+      return hasActiveBackups ? 2000 : 30000;
+    },
+  });
+
   // Fetch command history
   const { data: commandHistoryData } = useQuery({
     queryKey: ['command-history'],
     queryFn: getCommandHistory,
     refetchInterval: () => {
-      // Poll faster when there are active operations (import or repair)
+      // Poll faster when there are active operations
       const hasActiveImports = (importsData?.imports?.length ?? 0) > 0;
       const hasActiveRepairs = (repairsData?.repairs?.length ?? 0) > 0;
-      return (hasActiveImports || hasActiveRepairs) ? 2000 : 60000;
+      const hasActiveBackups = (backupsData?.backups?.length ?? 0) > 0;
+      return (hasActiveImports || hasActiveRepairs || hasActiveBackups) ? 2000 : 60000;
     },
   });
 
@@ -98,7 +111,10 @@ export const Dashboard = () => {
     if (configData?.tables?.length && !selectedTable) {
       setSelectedTable(configData.tables[0].name);
     }
-  }, [configData, selectedTable]);
+    if (configData?.tables?.length && !selectedBackupTable) {
+      setSelectedBackupTable(configData.tables[0].name);
+    }
+  }, [configData, selectedTable, selectedBackupTable]);
 
   // Build table options for select
   const tableOptions = configData?.tables?.map(t => ({
@@ -113,6 +129,13 @@ export const Dashboard = () => {
 
   // Check if the selected table has an import in progress
   const selectedTableImport = selectedTable ? getImportForTable(selectedTable) : undefined;
+
+  // Check if a backup is in progress for a specific table
+  const getBackupForTable = (tableName: string) => {
+    return backupsData?.backups?.find(b => b.tableName === tableName);
+  };
+
+  const selectedTableBackup = selectedBackupTable ? getBackupForTable(selectedBackupTable) : undefined;
 
   // Mutations
   const importMutation = useMutation({
@@ -142,6 +165,18 @@ export const Dashboard = () => {
     },
   });
 
+  const backupMutation = useMutation({
+    mutationFn: () => backupTable({ tableName: selectedBackupTable }),
+    onSuccess: (data) => {
+      toast.success('Backup started', data.message);
+      queryClient.invalidateQueries({ queryKey: ['backups'] });
+      queryClient.invalidateQueries({ queryKey: ['command-history'] });
+    },
+    onError: (error: any) => {
+      toast.error('Backup failed', error.response?.data?.error || error.message);
+    },
+  });
+
   const handleConfirmAction = () => {
     setConfirmModal({ ...confirmModal, isOpen: false });
 
@@ -152,10 +187,13 @@ export const Dashboard = () => {
       case 'repair':
         repairMutation.mutate();
         break;
+      case 'backup':
+        backupMutation.mutate();
+        break;
     }
   };
 
-  const openConfirmModal = (action: 'import' | 'repair') => {
+  const openConfirmModal = (action: 'import' | 'repair' | 'backup') => {
     const configs = {
       import: {
         title: 'Import Data',
@@ -167,6 +205,10 @@ export const Dashboard = () => {
           ? `Repair cluster using Replica ${selectedSourceReplica} as source? All other replicas will rejoin this node.`
           : 'Repair cluster using auto-selected source replica? The system will choose the best source automatically.',
       },
+      backup: {
+        title: 'Backup Delta Table',
+        message: `Are you sure you want to backup the delta table for "${selectedBackupTable}"? This will dump ${selectedBackupTable}_delta and upload it to cloud storage.`,
+      },
     };
 
     setConfirmModal({
@@ -176,7 +218,7 @@ export const Dashboard = () => {
     });
   };
 
-  const isAnyMutationLoading = importMutation.isPending || repairMutation.isPending;
+  const isAnyMutationLoading = importMutation.isPending || repairMutation.isPending || backupMutation.isPending;
 
   // Get cluster health badge
   const getClusterBadge = () => {
@@ -282,7 +324,7 @@ export const Dashboard = () => {
       {/* Actions */}
       <div>
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Actions</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {/* Import Panel */}
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
@@ -407,6 +449,53 @@ export const Dashboard = () => {
               </Button>
             </div>
           </Card>
+          {/* Backup Panel */}
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <CloudArrowUpIcon className="h-5 w-5 text-cpln-cyan" />
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Backup Delta</h3>
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              Backup a table's delta data to cloud storage.
+            </p>
+
+            <div className="space-y-4">
+              <div className="max-w-sm">
+                {configLoading ? (
+                  <LoadingSpinner size="sm" />
+                ) : tableOptions.length > 0 ? (
+                  <FormSelect
+                    label="Select Table"
+                    value={selectedBackupTable}
+                    onChange={setSelectedBackupTable}
+                    options={tableOptions}
+                  />
+                ) : (
+                  <p className="text-gray-500 dark:text-gray-400">No tables configured</p>
+                )}
+              </div>
+
+              {/* Backup status indicator */}
+              {selectedTableBackup && (
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md">
+                  <CloudArrowUpIcon className="h-4 w-4 text-green-600 dark:text-green-400 animate-spin" />
+                  <span className="text-sm text-green-700 dark:text-green-300">
+                    Backup {selectedTableBackup.lifecycleStage} for "{selectedBackupTable}"
+                  </span>
+                  <Badge variant="success">{selectedTableBackup.lifecycleStage}</Badge>
+                </div>
+              )}
+
+              <Button
+                variant="secondary"
+                onClick={() => openConfirmModal('backup')}
+                disabled={isAnyMutationLoading || !selectedBackupTable || !!selectedTableBackup}
+              >
+                <CloudArrowUpIcon className="h-4 w-4 mr-2" />
+                {backupMutation.isPending ? 'Starting...' : selectedTableBackup ? 'Backup in Progress' : 'Backup Table'}
+              </Button>
+            </div>
+          </Card>
         </div>
       </div>
 
@@ -432,11 +521,11 @@ export const Dashboard = () => {
                     <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
                       {new Date(cmd.created).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z')}
                     </span>
-                    <Badge variant={cmd.action === 'import' ? 'info' : 'warning'}>
+                    <Badge variant={cmd.action === 'import' ? 'info' : cmd.action === 'backup' ? 'cyan' : 'warning'}>
                       {cmd.action}
                     </Badge>
                     <span className="font-medium text-gray-900 dark:text-white">
-                      {cmd.action === 'import'
+                      {cmd.action === 'import' || cmd.action === 'backup'
                         ? cmd.tableName
                         : `Replica ${cmd.sourceReplica ?? 'auto'}`}
                     </span>
@@ -470,7 +559,7 @@ export const Dashboard = () => {
         onConfirm={handleConfirmAction}
         title={confirmModal.title}
         message={confirmModal.message}
-        confirmText={confirmModal.action === 'repair' ? 'Repair' : 'Confirm'}
+        confirmText={confirmModal.action === 'repair' ? 'Repair' : confirmModal.action === 'backup' ? 'Backup' : 'Confirm'}
         confirmButtonClass={
           confirmModal.action === 'repair'
             ? 'bg-red-600 text-white hover:bg-red-700'

@@ -134,8 +134,8 @@ export interface ImportsResponse {
 // Command history entry from /api/commands
 export interface CommandHistoryEntry {
   id: string;
-  action: 'import' | 'repair';
-  tableName?: string; // only for imports
+  action: 'import' | 'repair' | 'backup';
+  tableName?: string; // for imports and backups
   sourceReplica?: number; // only for repairs
   lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
   created: string; // ISO timestamp
@@ -144,6 +144,23 @@ export interface CommandHistoryEntry {
 // Command history response from /api/commands
 export interface CommandHistoryResponse {
   commands: CommandHistoryEntry[];
+}
+
+// Backup request - sent when triggering backup
+export interface BackupRequest {
+  tableName: string;
+}
+
+// Backup status from /api/backups
+export interface BackupStatus {
+  tableName: string;
+  commandId: string;
+  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+}
+
+// Backups response from /api/backups
+export interface BackupsResponse {
+  backups: BackupStatus[];
 }
 
 // Repair status from /api/repairs

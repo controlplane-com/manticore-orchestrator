@@ -39,6 +39,8 @@ type Config struct {
 	ListenAddr           string
 	BootstrapTimeout     int    // Seconds to wait before bootstrapping a lone replica
 	OrchestratorWorkload string // Name of the cron workload for triggering imports
+	BackupWorkload       string // Name of the cron workload for triggering backups
+	BackupContainer      string // Container name in the backup workload (default "backup")
 	ManticoreMySQLPort   string // Port for direct MySQL connections (default 9306)
 
 	// S3 configuration for indexer method
@@ -137,6 +139,8 @@ func main() {
 		ListenAddr:           getEnv("LISTEN_ADDR", ":8080"),
 		BootstrapTimeout:     getEnvInt("BOOTSTRAP_TIMEOUT", 60),
 		OrchestratorWorkload: getEnv("ORCHESTRATOR_WORKLOAD", ""),
+		BackupWorkload:       getEnv("BACKUP_WORKLOAD", ""),
+		BackupContainer:      getEnv("BACKUP_CONTAINER_NAME", "backup"),
 		ManticoreMySQLPort:   getEnv("MANTICORE_MYSQL_PORT", "9306"),
 		// S3 configuration for indexer method
 		S3Bucket:        getEnv("S3_BUCKET", ""),
@@ -223,7 +227,9 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/cluster/query-counts", server.handleClusterQueryCounts)
 	mux.HandleFunc("/api/tables/status", server.handleTablesStatus)
 	mux.HandleFunc("/api/tables/", server.handleTableSchema)
+	mux.HandleFunc("/api/backup", server.handleBackup)
 	mux.HandleFunc("/api/imports", server.handleImports)
+	mux.HandleFunc("/api/backups", server.handleBackups)
 	mux.HandleFunc("/api/repairs", server.handleRepairs)
 	mux.HandleFunc("/api/commands", server.handleCommands)
 	mux.HandleFunc("/api/query", server.handleQuery)
@@ -242,6 +248,22 @@ func runServer(config Config) {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// getOrchestratorWorkload returns the orchestrator cron workload name
+func (s *Server) getOrchestratorWorkload() string {
+	if s.config.OrchestratorWorkload != "" {
+		return s.config.OrchestratorWorkload
+	}
+	return strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
+}
+
+// getBackupWorkload returns the backup cron workload name
+func (s *Server) getBackupWorkload() string {
+	if s.config.BackupWorkload != "" {
+		return s.config.BackupWorkload
+	}
+	return strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-backup"
 }
 
 // getReplicaCount fetches the replica count from Control Plane API
@@ -934,11 +956,7 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&req) // Ignore error, optional field
 	}
 
-	orchestratorWorkload := s.config.OrchestratorWorkload
-	if orchestratorWorkload == "" {
-		// Derive from search workload name if not explicitly set
-		orchestratorWorkload = strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
-	}
+	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Check for in-progress imports or repairs
 	commands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
@@ -957,6 +975,24 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 				if action == "repair" {
 					jsonError(w, http.StatusConflict,
 						fmt.Sprintf("repair already in progress (command %s)", cmd.ID))
+					return
+				}
+			}
+		}
+	}
+
+	// Check for active backups on the backup workload
+	backupWorkload := s.getBackupWorkload()
+	backupCommands, backupErr := s.cplnClient.QueryActiveCommands(s.config.GVC, backupWorkload, 0)
+	if backupErr != nil {
+		slog.Warn("failed to query active backup commands", "error", backupErr)
+	} else {
+		for _, cmd := range backupCommands.Items {
+			if cmd.Type == "runCronWorkload" {
+				action := extractActionFromCommand(cmd)
+				if action == "backup" {
+					jsonError(w, http.StatusConflict,
+						fmt.Sprintf("backup in progress (command %s), cannot start repair", cmd.ID))
 					return
 				}
 			}
@@ -1132,6 +1168,36 @@ func extractActionFromCommand(cmd cpln.Command) string {
 	return ""
 }
 
+// extractDatasetFromCommand extracts the DATASET env var from a runCronWorkload command
+func extractDatasetFromCommand(cmd cpln.Command) string {
+	overrides, ok := cmd.Spec["containerOverrides"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, override := range overrides {
+		co, ok := override.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		env, ok := co["env"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, e := range env {
+			ev, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if ev["name"] == "DATASET" {
+				if val, ok := ev["value"].(string); ok {
+					return val
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // ImportStatus represents the status of an import operation
 type ImportStatus struct {
 	TableName      string `json:"tableName"`
@@ -1157,11 +1223,7 @@ func (s *Server) handleImports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orchestratorWorkload := s.config.OrchestratorWorkload
-	if orchestratorWorkload == "" {
-		// Derive from search workload name if not explicitly set
-		orchestratorWorkload = strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
-	}
+	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Query for active commands (pending or running)
 	commands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
@@ -1225,11 +1287,7 @@ func (s *Server) handleRepairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orchestratorWorkload := s.config.OrchestratorWorkload
-	if orchestratorWorkload == "" {
-		// Derive from search workload name if not explicitly set
-		orchestratorWorkload = strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
-	}
+	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Query for active commands (pending or running)
 	commands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
@@ -1299,8 +1357,8 @@ func extractSourceReplicaFromCommand(cmd cpln.Command) *int {
 // CommandHistoryEntry represents a command in the history
 type CommandHistoryEntry struct {
 	ID             string `json:"id"`
-	Action         string `json:"action"`                  // "import" or "repair"
-	TableName      string `json:"tableName,omitempty"`     // only for imports
+	Action         string `json:"action"`                  // "import", "repair", or "backup"
+	TableName      string `json:"tableName,omitempty"`     // for imports and backups
 	SourceReplica  *int   `json:"sourceReplica,omitempty"` // only for repairs
 	LifecycleStage string `json:"lifecycleStage"`
 	Created        string `json:"created"` // ISO timestamp for sorting
@@ -1324,11 +1382,7 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orchestratorWorkload := s.config.OrchestratorWorkload
-	if orchestratorWorkload == "" {
-		// Derive from search workload name if not explicitly set
-		orchestratorWorkload = strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
-	}
+	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Query all commands (all lifecycle stages), limit to 50 for history display
 	commands, err := s.cplnClient.QueryAllCommands(s.config.GVC, orchestratorWorkload, 50)
@@ -1364,6 +1418,40 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 				Created:        cmd.Created,
 			})
 		}
+	}
+
+	// Also query backup workload for backup command history
+	backupWorkload := s.getBackupWorkload()
+	backupCommands, backupErr := s.cplnClient.QueryAllCommands(s.config.GVC, backupWorkload, 50)
+	if backupErr != nil {
+		slog.Warn("failed to query backup command history", "error", backupErr)
+	} else {
+		for _, cmd := range backupCommands.Items {
+			action := extractActionFromCommand(cmd)
+			if action == "backup" {
+				dataset := extractDatasetFromCommand(cmd)
+				if dataset == "" {
+					continue
+				}
+				history = append(history, CommandHistoryEntry{
+					ID:             cmd.ID,
+					Action:         "backup",
+					TableName:      dataset,
+					LifecycleStage: cmd.LifecycleStage,
+					Created:        cmd.Created,
+				})
+			}
+		}
+	}
+
+	// Sort merged history by Created timestamp (descending)
+	sort.Slice(history, func(i, j int) bool {
+		return history[i].Created > history[j].Created
+	})
+
+	// Trim to 50 entries
+	if len(history) > 50 {
+		history = history[:50]
 	}
 
 	response := CommandHistoryResponse{
@@ -1407,11 +1495,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orchestratorWorkload := s.config.OrchestratorWorkload
-	if orchestratorWorkload == "" {
-		// Derive from search workload name if not explicitly set
-		orchestratorWorkload = strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
-	}
+	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Check for in-progress imports or repairs (pending or running) in a single query
 	commands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
@@ -1468,6 +1552,165 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		"message":   fmt.Sprintf("import started for table %s", req.TableName),
 		"commandId": cmd.ID,
 	})
+}
+
+// handleBackup handles POST /api/backup - triggers cron workload for backup
+func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check CPLN client is configured
+	if s.cplnClient == nil {
+		jsonError(w, http.StatusServiceUnavailable, "CPLN API client not configured")
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		TableName string `json:"tableName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.TableName == "" {
+		jsonError(w, http.StatusBadRequest, "tableName is required")
+		return
+	}
+
+	// Validate table exists in config
+	if _, err := getCSVPathForTable(s.config.TablesConfig, req.TableName); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	backupWorkload := s.getBackupWorkload()
+	orchestratorWorkload := s.getOrchestratorWorkload()
+
+	// Check backup workload for duplicate backup of same table
+	backupCommands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, backupWorkload, 0)
+	if err != nil {
+		slog.Warn("failed to query active backup commands", "error", err)
+	} else {
+		for _, cmd := range backupCommands.Items {
+			if cmd.Type == "runCronWorkload" {
+				action := extractActionFromCommand(cmd)
+				if action == "backup" {
+					dataset := extractDatasetFromCommand(cmd)
+					if dataset == req.TableName {
+						jsonError(w, http.StatusConflict,
+							fmt.Sprintf("backup already in progress for table %s (command %s)", req.TableName, cmd.ID))
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Check orchestrator workload for active repairs
+	orchCommands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
+	if err != nil {
+		slog.Warn("failed to query active orchestrator commands", "error", err)
+	} else {
+		for _, cmd := range orchCommands.Items {
+			if cmd.Type == "runCronWorkload" {
+				action := extractActionFromCommand(cmd)
+				if action == "repair" {
+					jsonError(w, http.StatusConflict,
+						fmt.Sprintf("repair in progress (command %s), cannot start backup", cmd.ID))
+					return
+				}
+			}
+		}
+	}
+
+	// Start the backup cron workload with overrides
+	overrides := []cpln.ContainerOverride{
+		{
+			Name: s.config.BackupContainer,
+			Env: []cpln.EnvVar{
+				{Name: "ACTION", Value: "backup"},
+				{Name: "DATASET", Value: req.TableName},
+			},
+		},
+	}
+
+	slog.Info("triggering backup via cron workload", "table", req.TableName, "workload", backupWorkload)
+	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start backup: %v", err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "accepted",
+		"message":   fmt.Sprintf("backup started for table %s", req.TableName),
+		"commandId": cmd.ID,
+	})
+}
+
+// BackupStatus represents the status of a backup operation
+type BackupStatus struct {
+	TableName      string `json:"tableName"`
+	CommandID      string `json:"commandId"`
+	LifecycleStage string `json:"lifecycleStage"`
+}
+
+// BackupsResponse represents the response for /api/backups
+type BackupsResponse struct {
+	Backups []BackupStatus `json:"backups"`
+}
+
+// handleBackups handles GET /api/backups - returns active backup commands
+func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.cplnClient == nil {
+		jsonError(w, http.StatusServiceUnavailable, "CPLN API client not configured")
+		return
+	}
+
+	backupWorkload := s.getBackupWorkload()
+
+	commands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, backupWorkload, 0)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to query commands: %v", err))
+		return
+	}
+
+	var backups []BackupStatus
+	for _, cmd := range commands.Items {
+		if cmd.Type == "runCronWorkload" {
+			action := extractActionFromCommand(cmd)
+			if action != "backup" {
+				continue
+			}
+			dataset := extractDatasetFromCommand(cmd)
+			if dataset == "" {
+				continue
+			}
+			backups = append(backups, BackupStatus{
+				TableName:      dataset,
+				CommandID:      cmd.ID,
+				LifecycleStage: cmd.LifecycleStage,
+			})
+		}
+	}
+
+	response := BackupsResponse{
+		Backups: backups,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 // runCLI runs the orchestrator in CLI mode (for cron jobs)
