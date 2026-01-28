@@ -16,6 +16,7 @@ if [ "${ACTION}" = "backup" ]; then
   mysqldump \
     --host="${MANTICORE_HOST}" \
     --port="${MANTICORE_PORT:-9306}" \
+    --skip-lock-tables \
     Manticore "${DELTA_TABLE}" \
     > /tmp/delta.sql
 
