@@ -8,7 +8,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner';
 import { FormSelect } from '../components/FormSelect';
 import { ConfirmActionModal } from '../components/ConfirmActionModal';
 import { useToast } from '../hooks/useToast';
-import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster } from '../api/orchestrator';
+import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster, getBackupFiles, restoreTable } from '../api/orchestrator';
 import {
   HeartIcon,
   TableCellsIcon,
@@ -18,6 +18,7 @@ import {
   ExclamationTriangleIcon,
   ClockIcon,
   CloudArrowUpIcon,
+  CloudArrowDownIcon,
 } from '@heroicons/react/24/outline';
 
 export const Dashboard = () => {
@@ -26,9 +27,12 @@ export const Dashboard = () => {
   const [selectedTable, setSelectedTable] = useState('');
   const [selectedSourceReplica, setSelectedSourceReplica] = useState('');
   const [selectedBackupTable, setSelectedBackupTable] = useState('');
+  const [selectedRestoreTable, setSelectedRestoreTable] = useState('');
+  const [selectedBackupFile, setSelectedBackupFile] = useState('');
+  const [commandFilter, setCommandFilter] = useState<'all' | 'import' | 'repair' | 'backup' | 'restore'>('all');
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
-    action: 'import' | 'repair' | 'backup';
+    action: 'import' | 'repair' | 'backup' | 'restore';
     title: string;
     message: string;
   }>({ isOpen: false, action: 'import', title: '', message: '' });
@@ -106,6 +110,14 @@ export const Dashboard = () => {
     },
   });
 
+  // Fetch backup files for the selected restore table
+  const { data: backupFilesData, isLoading: backupFilesLoading } = useQuery({
+    queryKey: ['backup-files', selectedRestoreTable],
+    queryFn: () => getBackupFiles(selectedRestoreTable),
+    enabled: !!selectedRestoreTable,
+    refetchInterval: 60000, // Refresh every minute
+  });
+
   // Set default selected table when config loads
   useEffect(() => {
     if (configData?.tables?.length && !selectedTable) {
@@ -114,7 +126,15 @@ export const Dashboard = () => {
     if (configData?.tables?.length && !selectedBackupTable) {
       setSelectedBackupTable(configData.tables[0].name);
     }
-  }, [configData, selectedTable, selectedBackupTable]);
+    if (configData?.tables?.length && !selectedRestoreTable) {
+      setSelectedRestoreTable(configData.tables[0].name);
+    }
+  }, [configData, selectedTable, selectedBackupTable, selectedRestoreTable]);
+
+  // Clear selected backup file when restore table changes
+  useEffect(() => {
+    setSelectedBackupFile('');
+  }, [selectedRestoreTable]);
 
   // Build table options for select
   const tableOptions = configData?.tables?.map(t => ({
@@ -156,7 +176,7 @@ export const Dashboard = () => {
       selectedSourceReplica ? { sourceReplica: parseInt(selectedSourceReplica, 10) } : undefined
     ),
     onSuccess: (data) => {
-      toast.success('Repair completed', data.message);
+      toast.success('Repair started', data.message);
       queryClient.invalidateQueries({ queryKey: ['cluster'] });
       queryClient.invalidateQueries({ queryKey: ['cluster-discovery'] });
     },
@@ -177,6 +197,17 @@ export const Dashboard = () => {
     },
   });
 
+  const restoreMutation = useMutation({
+    mutationFn: () => restoreTable({ tableName: selectedRestoreTable, filename: selectedBackupFile }),
+    onSuccess: (data) => {
+      toast.success('Restore started', data.message);
+      queryClient.invalidateQueries({ queryKey: ['command-history'] });
+    },
+    onError: (error: any) => {
+      toast.error('Restore failed', error.response?.data?.error || error.message);
+    },
+  });
+
   const handleConfirmAction = () => {
     setConfirmModal({ ...confirmModal, isOpen: false });
 
@@ -190,10 +221,13 @@ export const Dashboard = () => {
       case 'backup':
         backupMutation.mutate();
         break;
+      case 'restore':
+        restoreMutation.mutate();
+        break;
     }
   };
 
-  const openConfirmModal = (action: 'import' | 'repair' | 'backup') => {
+  const openConfirmModal = (action: 'import' | 'repair' | 'backup' | 'restore') => {
     const configs = {
       import: {
         title: 'Import Data',
@@ -209,6 +243,10 @@ export const Dashboard = () => {
         title: 'Backup Delta Table',
         message: `Are you sure you want to backup the delta table for "${selectedBackupTable}"? This will dump ${selectedBackupTable}_delta and upload it to cloud storage.`,
       },
+      restore: {
+        title: 'Restore Delta Table',
+        message: `Are you sure you want to restore "${selectedRestoreTable}_delta" from backup "${selectedBackupFile}"? This will overwrite the current delta table data.`,
+      },
     };
 
     setConfirmModal({
@@ -218,7 +256,7 @@ export const Dashboard = () => {
     });
   };
 
-  const isAnyMutationLoading = importMutation.isPending || repairMutation.isPending || backupMutation.isPending;
+  const isAnyMutationLoading = importMutation.isPending || repairMutation.isPending || backupMutation.isPending || restoreMutation.isPending;
 
   // Get cluster health badge
   const getClusterBadge = () => {
@@ -324,7 +362,7 @@ export const Dashboard = () => {
       {/* Actions */}
       <div>
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Actions</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           {/* Import Panel */}
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
@@ -478,7 +516,7 @@ export const Dashboard = () => {
               {/* Backup status indicator */}
               {selectedTableBackup && (
                 <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md">
-                  <CloudArrowUpIcon className="h-4 w-4 text-green-600 dark:text-green-400 animate-spin" />
+                  <ArrowPathIcon className="h-4 w-4 text-green-600 dark:text-green-400 animate-spin" />
                   <span className="text-sm text-green-700 dark:text-green-300">
                     Backup {selectedTableBackup.lifecycleStage} for "{selectedBackupTable}"
                   </span>
@@ -496,6 +534,67 @@ export const Dashboard = () => {
               </Button>
             </div>
           </Card>
+
+          {/* Restore Panel */}
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <CloudArrowDownIcon className="h-5 w-5 text-cpln-cyan" />
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Restore Delta</h3>
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              Restore a table's delta data from a cloud backup.
+            </p>
+
+            <div className="space-y-4">
+              <div className="max-w-sm">
+                {configLoading ? (
+                  <LoadingSpinner size="sm" />
+                ) : tableOptions.length > 0 ? (
+                  <FormSelect
+                    label="Select Table"
+                    value={selectedRestoreTable}
+                    onChange={setSelectedRestoreTable}
+                    options={tableOptions}
+                  />
+                ) : (
+                  <p className="text-gray-500 dark:text-gray-400">No tables configured</p>
+                )}
+              </div>
+
+              <div className="max-w-sm">
+                {backupFilesLoading ? (
+                  <div className="flex items-center gap-2">
+                    <LoadingSpinner size="sm" />
+                    <span className="text-sm text-gray-500">Loading backups...</span>
+                  </div>
+                ) : (backupFilesData?.backups?.length ?? 0) > 0 ? (
+                  <FormSelect
+                    label="Select Backup"
+                    value={selectedBackupFile}
+                    onChange={setSelectedBackupFile}
+                    options={[
+                      { value: '', label: 'Select a backup file...' },
+                      ...(backupFilesData?.backups?.map(b => ({
+                        value: b.filename,
+                        label: `${b.lastModified.replace('T', ' ').replace('Z', '')} (${(b.size / 1024).toFixed(1)} KB)`,
+                      })) || []),
+                    ]}
+                  />
+                ) : selectedRestoreTable ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">No backups found for this table</p>
+                ) : null}
+              </div>
+
+              <Button
+                variant="secondary"
+                onClick={() => openConfirmModal('restore')}
+                disabled={isAnyMutationLoading || !selectedRestoreTable || !selectedBackupFile}
+              >
+                <CloudArrowDownIcon className="h-4 w-4 mr-2" />
+                {restoreMutation.isPending ? 'Starting...' : 'Restore Table'}
+              </Button>
+            </div>
+          </Card>
         </div>
       </div>
 
@@ -503,16 +602,50 @@ export const Dashboard = () => {
       <div className="mt-8">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Command History</h2>
         <Card className="p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <ClockIcon className="h-5 w-5 text-cpln-cyan" />
-            <h3 className="text-base font-semibold text-gray-900 dark:text-white">Recent Commands</h3>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <ClockIcon className="h-5 w-5 text-cpln-cyan" />
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Recent Commands</h3>
+            </div>
+            <div className="flex items-center gap-1">
+              {([
+                { value: 'all', label: 'All', activeClass: 'bg-gray-700 text-white dark:bg-gray-200 dark:text-gray-900' },
+                { value: 'import', label: 'Import', activeClass: 'bg-blue-600 text-white dark:bg-blue-500 dark:text-white' },
+                { value: 'repair', label: 'Repair', activeClass: 'bg-yellow-500 text-white dark:bg-yellow-500 dark:text-white' },
+                { value: 'backup', label: 'Backup', activeClass: 'bg-purple-600 text-white dark:bg-purple-500 dark:text-white' },
+                { value: 'restore', label: 'Restore', activeClass: 'bg-cyan-600 text-white dark:bg-cyan-500 dark:text-white' },
+              ] as const).map(({ value, label, activeClass }) => (
+                <button
+                  key={value}
+                  onClick={() => setCommandFilter(value)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                    commandFilter === value
+                      ? activeClass
+                      : 'bg-gray-100 dark:bg-stone-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-stone-600'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {commandHistoryData?.commands?.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400">No commands have been run yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {commandHistoryData?.commands?.slice(0, 15).map((cmd) => (
+          {(() => {
+            const filteredCommands = commandHistoryData?.commands
+              ?.filter(cmd => commandFilter === 'all' || cmd.action === commandFilter)
+              ?.slice(0, 15);
+
+            if (!filteredCommands?.length) {
+              return (
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  {commandFilter === 'all' ? 'No commands have been run yet.' : `No ${commandFilter} commands found.`}
+                </p>
+              );
+            }
+
+            return (
+              <div className="space-y-2">
+                {filteredCommands.map((cmd) => (
                 <div
                   key={cmd.id}
                   className="flex items-center justify-between py-2 px-3 bg-gray-50 dark:bg-stone-700 rounded"
@@ -521,11 +654,15 @@ export const Dashboard = () => {
                     <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
                       {new Date(cmd.created).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z')}
                     </span>
-                    <Badge variant={cmd.action === 'import' ? 'info' : cmd.action === 'backup' ? 'cyan' : 'warning'}>
+                    <Badge variant={
+                      cmd.action === 'import' ? 'info' :
+                      cmd.action === 'backup' ? 'purple' :
+                      cmd.action === 'restore' ? 'cyan' : 'warning'
+                    }>
                       {cmd.action}
                     </Badge>
                     <span className="font-medium text-gray-900 dark:text-white">
-                      {cmd.action === 'import' || cmd.action === 'backup'
+                      {cmd.action === 'import' || cmd.action === 'backup' || cmd.action === 'restore'
                         ? cmd.tableName
                         : `Replica ${cmd.sourceReplica ?? 'auto'}`}
                     </span>
@@ -548,7 +685,8 @@ export const Dashboard = () => {
                 </div>
               ))}
             </div>
-          )}
+            );
+          })()}
         </Card>
       </div>
 
@@ -559,9 +697,13 @@ export const Dashboard = () => {
         onConfirm={handleConfirmAction}
         title={confirmModal.title}
         message={confirmModal.message}
-        confirmText={confirmModal.action === 'repair' ? 'Repair' : confirmModal.action === 'backup' ? 'Backup' : 'Confirm'}
+        confirmText={
+          confirmModal.action === 'repair' ? 'Repair' :
+          confirmModal.action === 'backup' ? 'Backup' :
+          confirmModal.action === 'restore' ? 'Restore' : 'Confirm'
+        }
         confirmButtonClass={
-          confirmModal.action === 'repair'
+          confirmModal.action === 'repair' || confirmModal.action === 'restore'
             ? 'bg-red-600 text-white hover:bg-red-700'
             : 'bg-cpln-cyan text-white hover:bg-cpln-cyan-dark'
         }

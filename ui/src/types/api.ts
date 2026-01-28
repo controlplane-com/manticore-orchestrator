@@ -134,8 +134,8 @@ export interface ImportsResponse {
 // Command history entry from /api/commands
 export interface CommandHistoryEntry {
   id: string;
-  action: 'import' | 'repair' | 'backup';
-  tableName?: string; // for imports and backups
+  action: 'import' | 'repair' | 'backup' | 'restore';
+  tableName?: string; // for imports, backups, and restores
   sourceReplica?: number; // only for repairs
   lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
   created: string; // ISO timestamp
@@ -223,3 +223,22 @@ export interface QueryCountEntry {
 
 // Query counts response from /api/cluster/query-counts
 export interface QueryCountsResponse extends Array<QueryCountEntry> {}
+
+// Backup file entry from /api/backups/files
+export interface BackupFile {
+  filename: string;
+  key: string;
+  size: number;
+  lastModified: string; // ISO timestamp
+}
+
+// Backup files response from /api/backups/files
+export interface BackupFilesResponse {
+  backups: BackupFile[];
+}
+
+// Restore request - sent when triggering restore
+export interface RestoreRequest {
+  tableName: string;
+  filename: string;
+}

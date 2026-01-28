@@ -31,11 +31,34 @@ function isBroadcastResponse(
   return 'results' in response && Array.isArray(response.results);
 }
 
+// Helper to add cluster prefix to table names in SQL queries
+// Handles: FROM table, INTO table, UPDATE table, JOIN table
+function addClusterPrefix(sql: string, cluster: string): string {
+  if (!cluster) return sql;
+
+  // Pattern matches table names after FROM, INTO, UPDATE, JOIN (case insensitive)
+  // Avoids prefixing if already has a colon (already prefixed)
+  const patterns = [
+    /(\bFROM\s+)([a-zA-Z_][a-zA-Z0-9_]*)(?!:)/gi,
+    /(\bINTO\s+)([a-zA-Z_][a-zA-Z0-9_]*)(?!:)/gi,
+    /(\bUPDATE\s+)([a-zA-Z_][a-zA-Z0-9_]*)(?!:)/gi,
+    /(\bJOIN\s+)([a-zA-Z_][a-zA-Z0-9_]*)(?!:)/gi,
+  ];
+
+  let result = sql;
+  for (const pattern of patterns) {
+    result = result.replace(pattern, `$1${cluster}:$2`);
+  }
+  return result;
+}
+
 export const Query = () => {
   const toast = useToast();
   const [query, setQuery] = useState('');
   const [targetReplica, setTargetReplica] = useState('broadcast'); // 'broadcast' = all replicas, '' = load balanced, number = specific replica
   const [activeResultTab, setActiveResultTab] = useState(0);
+  const [clusterPrefix, setClusterPrefix] = useState('manticore');
+  const [autoPrefix, setAutoPrefix] = useState(true);
 
   // Store the last successful response
   const [lastResponse, setLastResponse] = useState<
@@ -115,8 +138,14 @@ export const Query = () => {
   const handleExecute = () => {
     if (!query.trim()) return;
 
+    // Apply cluster prefix if enabled
+    let finalQuery = query.trim();
+    if (autoPrefix && clusterPrefix) {
+      finalQuery = addClusterPrefix(finalQuery, clusterPrefix);
+    }
+
     const request: SqlQueryRequest = {
-      query: query.trim(),
+      query: finalQuery,
     };
 
     if (targetReplica === 'broadcast') {
@@ -275,7 +304,7 @@ export const Query = () => {
 
       {/* Query Input Section */}
       <Card className="p-6 mb-6">
-        {/* Target Selection */}
+        {/* Target Selection and Cluster Prefix */}
         <div className="flex flex-wrap items-end gap-4 mb-4">
           <div className="w-64">
             {clusterLoading ? (
@@ -293,6 +322,32 @@ export const Query = () => {
                 options={replicaOptions}
               />
             )}
+          </div>
+
+          <div className="w-40">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Cluster Prefix
+            </label>
+            <input
+              type="text"
+              value={clusterPrefix}
+              onChange={(e) => setClusterPrefix(e.target.value)}
+              className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-stone-600 bg-white dark:bg-stone-700 text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-cpln-cyan focus:border-transparent"
+              placeholder="manticore"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 pb-2">
+            <input
+              type="checkbox"
+              id="autoPrefix"
+              checked={autoPrefix}
+              onChange={(e) => setAutoPrefix(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-cpln-cyan focus:ring-cpln-cyan"
+            />
+            <label htmlFor="autoPrefix" className="text-sm text-gray-700 dark:text-gray-300">
+              Auto-prefix tables
+            </label>
           </div>
         </div>
 

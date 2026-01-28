@@ -53,13 +53,20 @@ type Config struct {
 
 	// Shared volume configuration (alternative to S3 for indexer output)
 	SharedVolumeMount string // Mount path for shared volume (e.g., "/mnt/shared") - same path on cron and agents
+
+	// Backup storage configuration (for listing/restore)
+	BackupProvider string // "aws" or "gcp" - determines which SDK to use
+	BackupBucket   string // Bucket name for backups
+	BackupPrefix   string // Prefix within bucket (e.g., "backups")
+	BackupRegion   string // AWS region for S3 backups
 }
 
 // Server is the orchestrator REST API server
 type Server struct {
-	config     Config
-	cplnClient *cpln.Client
-	mu         sync.RWMutex
+	config       Config
+	cplnClient   *cpln.Client
+	backupClient *s3.Client // S3 client for backup operations (also works for S3-compatible storage)
+	mu           sync.RWMutex
 }
 
 // TableConfig represents a table configuration entry
@@ -151,6 +158,11 @@ func main() {
 		IndexerMemLimit: getEnv("INDEXER_MEM_LIMIT", "2G"),
 		// Shared volume configuration (alternative to S3)
 		SharedVolumeMount: getEnv("SHARED_VOLUME_MOUNT", ""),
+		// Backup storage configuration
+		BackupProvider: getEnv("BACKUP_PROVIDER", "aws"),
+		BackupBucket:   getEnv("BACKUP_BUCKET", ""),
+		BackupPrefix:   getEnv("BACKUP_PREFIX", "backups"),
+		BackupRegion:   getEnv("BACKUP_REGION", "us-east-1"),
 	}
 
 	if config.AuthToken == "" {
@@ -175,9 +187,22 @@ func runServer(config Config) {
 		slog.Warn("CPLN_TOKEN or CPLN_ORG not set, some features will be limited")
 	}
 
+	// Initialize backup storage client if configured
+	var backupClient *s3.Client
+	if config.BackupBucket != "" && config.BackupProvider == "aws" {
+		var err error
+		backupClient, err = s3.NewClient(config.BackupBucket, config.BackupRegion)
+		if err != nil {
+			slog.Warn("failed to create backup S3 client", "error", err)
+		} else {
+			slog.Info("backup S3 client initialized", "bucket", config.BackupBucket, "prefix", config.BackupPrefix)
+		}
+	}
+
 	server := &Server{
-		config:     config,
-		cplnClient: cplnClient,
+		config:       config,
+		cplnClient:   cplnClient,
+		backupClient: backupClient,
 	}
 
 	// Start background repair loop
@@ -230,6 +255,8 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/backup", server.handleBackup)
 	mux.HandleFunc("/api/imports", server.handleImports)
 	mux.HandleFunc("/api/backups", server.handleBackups)
+	mux.HandleFunc("/api/backups/files", server.handleBackupFiles)
+	mux.HandleFunc("/api/restore", server.handleRestore)
 	mux.HandleFunc("/api/repairs", server.handleRepairs)
 	mux.HandleFunc("/api/commands", server.handleCommands)
 	mux.HandleFunc("/api/query", server.handleQuery)
@@ -255,7 +282,7 @@ func (s *Server) getOrchestratorWorkload() string {
 	if s.config.OrchestratorWorkload != "" {
 		return s.config.OrchestratorWorkload
 	}
-	return strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator"
+	return strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator-api"
 }
 
 // getBackupWorkload returns the backup cron workload name
@@ -1428,14 +1455,14 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for _, cmd := range backupCommands.Items {
 			action := extractActionFromCommand(cmd)
-			if action == "backup" {
+			if action == "backup" || action == "restore" {
 				dataset := extractDatasetFromCommand(cmd)
 				if dataset == "" {
 					continue
 				}
 				history = append(history, CommandHistoryEntry{
 					ID:             cmd.ID,
-					Action:         "backup",
+					Action:         action,
 					TableName:      dataset,
 					LifecycleStage: cmd.LifecycleStage,
 					Created:        cmd.Created,
@@ -1711,6 +1738,155 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// BackupFilesResponse represents the response for /api/backups/files
+type BackupFilesResponse struct {
+	Backups []s3.BackupFile `json:"backups"`
+}
+
+// handleBackupFiles handles GET /api/backups/files - returns list of backup files for a table
+func (s *Server) handleBackupFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check backup client is configured
+	if s.backupClient == nil {
+		jsonError(w, http.StatusServiceUnavailable, "backup storage not configured (BACKUP_BUCKET/BACKUP_PROVIDER required)")
+		return
+	}
+
+	// Get table name from query param
+	tableName := r.URL.Query().Get("tableName")
+	if tableName == "" {
+		jsonError(w, http.StatusBadRequest, "tableName query parameter is required")
+		return
+	}
+
+	// Validate table exists in config
+	if _, err := getCSVPathForTable(s.config.TablesConfig, tableName); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// List backups from storage
+	backups, err := s.backupClient.ListBackups(r.Context(), s.config.BackupPrefix, tableName)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list backups: %v", err))
+		return
+	}
+
+	response := BackupFilesResponse{
+		Backups: backups,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleRestore handles POST /api/restore - triggers cron workload for restore
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Check CPLN client is configured
+	if s.cplnClient == nil {
+		jsonError(w, http.StatusServiceUnavailable, "CPLN API client not configured")
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		TableName string `json:"tableName"`
+		Filename  string `json:"filename"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.TableName == "" {
+		jsonError(w, http.StatusBadRequest, "tableName is required")
+		return
+	}
+	if req.Filename == "" {
+		jsonError(w, http.StatusBadRequest, "filename is required")
+		return
+	}
+
+	// Validate table exists in config
+	if _, err := getCSVPathForTable(s.config.TablesConfig, req.TableName); err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	backupWorkload := s.getBackupWorkload()
+	orchestratorWorkload := s.getOrchestratorWorkload()
+
+	// Check backup workload for active operations
+	backupCommands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, backupWorkload, 0)
+	if err != nil {
+		slog.Warn("failed to query active backup commands", "error", err)
+	} else {
+		for _, cmd := range backupCommands.Items {
+			if cmd.Type == "runCronWorkload" {
+				action := extractActionFromCommand(cmd)
+				if action == "backup" || action == "restore" {
+					jsonError(w, http.StatusConflict,
+						fmt.Sprintf("%s operation in progress (command %s), cannot start restore", action, cmd.ID))
+					return
+				}
+			}
+		}
+	}
+
+	// Check orchestrator workload for active repairs
+	orchCommands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
+	if err != nil {
+		slog.Warn("failed to query active orchestrator commands", "error", err)
+	} else {
+		for _, cmd := range orchCommands.Items {
+			if cmd.Type == "runCronWorkload" {
+				action := extractActionFromCommand(cmd)
+				if action == "repair" {
+					jsonError(w, http.StatusConflict,
+						fmt.Sprintf("repair in progress (command %s), cannot start restore", cmd.ID))
+					return
+				}
+			}
+		}
+	}
+
+	// Start the backup cron workload with restore action
+	overrides := []cpln.ContainerOverride{
+		{
+			Name: s.config.BackupContainer,
+			Env: []cpln.EnvVar{
+				{Name: "ACTION", Value: "restore"},
+				{Name: "DATASET", Value: req.TableName},
+				{Name: "RESTORE_FILE", Value: req.Filename},
+			},
+		},
+	}
+
+	slog.Info("triggering restore via cron workload", "table", req.TableName, "filename", req.Filename, "workload", backupWorkload)
+	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start restore: %v", err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "accepted",
+		"message":   fmt.Sprintf("restore started for table %s from %s", req.TableName, req.Filename),
+		"commandId": cmd.ID,
+	})
 }
 
 // runCLI runs the orchestrator in CLI mode (for cron jobs)

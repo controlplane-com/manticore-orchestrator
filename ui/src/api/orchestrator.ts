@@ -4,6 +4,7 @@ import type {
   ImportRequest,
   RepairRequest,
   BackupRequest,
+  RestoreRequest,
   ConfigResponse,
   ClusterResponse,
   ClusterDiscoveryResponse,
@@ -17,6 +18,7 @@ import type {
   SqlQueryResponse,
   SqlBroadcastResponse,
   QueryCountsResponse,
+  BackupFilesResponse,
 } from '../types/api';
 
 const api = axios.create({
@@ -130,6 +132,18 @@ export const executeSqlQuery = async (
   request: SqlQueryRequest
 ): Promise<SqlQueryResponse | SqlBroadcastResponse> => {
   const response = await api.post('/query', request);
+  return response.data;
+};
+
+// Get backup files for a table (authenticated)
+export const getBackupFiles = async (tableName: string): Promise<BackupFilesResponse> => {
+  const response = await api.get(`/backups/files?tableName=${encodeURIComponent(tableName)}`);
+  return response.data;
+};
+
+// Restore a table from backup (authenticated)
+export const restoreTable = async (request: RestoreRequest): Promise<ApiResponse> => {
+  const response = await api.post('/restore', request);
   return response.data;
 };
 

@@ -235,3 +235,65 @@ func (c *Client) downloadFile(ctx context.Context, s3Key, localPath string) erro
 func (c *Client) Bucket() string {
 	return c.bucket
 }
+
+// BackupFile represents a backup file in cloud storage
+type BackupFile struct {
+	Filename     string `json:"filename"`
+	Key          string `json:"key"`
+	Size         int64  `json:"size"`
+	LastModified string `json:"lastModified"` // ISO timestamp
+}
+
+// ListBackups lists backup files for a specific table from S3
+// Files are expected to be named: {tableName}_delta-{timestamp}.sql.gz
+func (c *Client) ListBackups(ctx context.Context, prefix, tableName string) ([]BackupFile, error) {
+	// Ensure prefix doesn't have trailing slash
+	prefix = strings.TrimSuffix(prefix, "/")
+
+	// Build the search prefix: {prefix}/{tableName}_delta-
+	searchPrefix := fmt.Sprintf("%s/%s_delta-", prefix, tableName)
+
+	paginator := s3.NewListObjectsV2Paginator(c.s3Client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(searchPrefix),
+	})
+
+	var backups []BackupFile
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list objects: %w", err)
+		}
+
+		for _, obj := range output.Contents {
+			// Extract filename from key
+			filename := *obj.Key
+			if idx := strings.LastIndex(filename, "/"); idx != -1 {
+				filename = filename[idx+1:]
+			}
+
+			// Only include .sql.gz files
+			if !strings.HasSuffix(filename, ".sql.gz") {
+				continue
+			}
+
+			backups = append(backups, BackupFile{
+				Filename:     filename,
+				Key:          *obj.Key,
+				Size:         *obj.Size,
+				LastModified: obj.LastModified.UTC().Format("2006-01-02T15:04:05Z"),
+			})
+		}
+	}
+
+	// Sort by LastModified descending (newest first)
+	for i := 0; i < len(backups)-1; i++ {
+		for j := i + 1; j < len(backups); j++ {
+			if backups[i].LastModified < backups[j].LastModified {
+				backups[i], backups[j] = backups[j], backups[i]
+			}
+		}
+	}
+
+	return backups, nil
+}
