@@ -1597,6 +1597,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var req struct {
 		TableName string `json:"tableName"`
+		Type      string `json:"type"` // "delta" (default) or "main"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body")
@@ -1605,6 +1606,13 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 	if req.TableName == "" {
 		jsonError(w, http.StatusBadRequest, "tableName is required")
+		return
+	}
+	if req.Type == "" {
+		req.Type = "delta"
+	}
+	if req.Type != "delta" && req.Type != "main" {
+		jsonError(w, http.StatusBadRequest, "type must be 'delta' or 'main'")
 		return
 	}
 
@@ -1654,19 +1662,40 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build env vars for cron workload
+	envVars := []cpln.EnvVar{
+		{Name: "ACTION", Value: "backup"},
+		{Name: "DATASET", Value: req.TableName},
+		{Name: "TYPE", Value: req.Type},
+	}
+
+	// For main table backup, discover the active slot
+	if req.Type == "main" {
+		replicaCount, err := s.getReplicaCount()
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get replica count: %v", err))
+			return
+		}
+		clients := s.buildClients(replicaCount)
+		slot := actions2.DiscoverTableSlot(clients, req.TableName)
+		if slot == "" {
+			jsonError(w, http.StatusBadRequest,
+				fmt.Sprintf("cannot determine active main table slot for %s — ensure at least one healthy replica is available", req.TableName))
+			return
+		}
+		envVars = append(envVars, cpln.EnvVar{Name: "SLOT", Value: slot})
+		slog.Info("discovered active slot for main backup", "table", req.TableName, "slot", slot)
+	}
+
 	// Start the backup cron workload with overrides
 	overrides := []cpln.ContainerOverride{
 		{
 			Name: s.config.BackupContainer,
-			Env: []cpln.EnvVar{
-				{Name: "ACTION", Value: "backup"},
-				{Name: "DATASET", Value: req.TableName},
-				{Name: "TYPE", Value: "delta"},
-			},
+			Env:  envVars,
 		},
 	}
 
-	slog.Info("triggering backup via cron workload", "table", req.TableName, "workload", backupWorkload)
+	slog.Info("triggering backup via cron workload", "table", req.TableName, "type", req.Type, "workload", backupWorkload)
 	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start backup: %v", err))
@@ -1677,7 +1706,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "accepted",
-		"message":   fmt.Sprintf("backup started for table %s", req.TableName),
+		"message":   fmt.Sprintf("%s backup started for table %s", req.Type, req.TableName),
 		"commandId": cmd.ID,
 	})
 }
@@ -1772,8 +1801,18 @@ func (s *Server) handleBackupFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get backup type from query param (default to delta)
+	backupType := r.URL.Query().Get("type")
+	if backupType == "" {
+		backupType = "delta"
+	}
+	if backupType != "delta" && backupType != "main" {
+		jsonError(w, http.StatusBadRequest, "type must be 'delta' or 'main'")
+		return
+	}
+
 	// List backups from storage
-	backups, err := s.backupClient.ListBackups(r.Context(), s.config.BackupPrefix, tableName)
+	backups, err := s.backupClient.ListBackups(r.Context(), s.config.BackupPrefix, tableName, backupType)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list backups: %v", err))
 		return
@@ -1804,6 +1843,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TableName string `json:"tableName"`
 		Filename  string `json:"filename"`
+		Type      string `json:"type"` // "delta" (default) or "main"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body")
@@ -1816,6 +1856,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Filename == "" {
 		jsonError(w, http.StatusBadRequest, "filename is required")
+		return
+	}
+	if req.Type == "" {
+		req.Type = "delta"
+	}
+	if req.Type != "delta" && req.Type != "main" {
+		jsonError(w, http.StatusBadRequest, "type must be 'delta' or 'main'")
 		return
 	}
 
@@ -1862,20 +1909,43 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build env vars for cron workload
+	envVars := []cpln.EnvVar{
+		{Name: "ACTION", Value: "restore"},
+		{Name: "DATASET", Value: req.TableName},
+		{Name: "TYPE", Value: req.Type},
+		{Name: "RESTORE_FILE", Value: req.Filename},
+	}
+
+	// For main table restore, parse the slot from the backup filename
+	if req.Type == "main" {
+		// Filename format: {dataset}_main_{slot}-{timestamp}.tar.gz
+		prefix := req.TableName + "_main_"
+		idx := strings.Index(req.Filename, prefix)
+		if idx == -1 || len(req.Filename) < idx+len(prefix)+1 {
+			jsonError(w, http.StatusBadRequest,
+				fmt.Sprintf("cannot determine slot from restore filename: %s", req.Filename))
+			return
+		}
+		slot := string(req.Filename[idx+len(prefix)])
+		if slot != "a" && slot != "b" {
+			jsonError(w, http.StatusBadRequest,
+				fmt.Sprintf("invalid slot '%s' in restore filename: %s", slot, req.Filename))
+			return
+		}
+		envVars = append(envVars, cpln.EnvVar{Name: "SLOT", Value: slot})
+		slog.Info("parsed slot from restore filename", "table", req.TableName, "slot", slot, "filename", req.Filename)
+	}
+
 	// Start the backup cron workload with restore action
 	overrides := []cpln.ContainerOverride{
 		{
 			Name: s.config.BackupContainer,
-			Env: []cpln.EnvVar{
-				{Name: "ACTION", Value: "restore"},
-				{Name: "DATASET", Value: req.TableName},
-				{Name: "TYPE", Value: "delta"},
-				{Name: "RESTORE_FILE", Value: req.Filename},
-			},
+			Env:  envVars,
 		},
 	}
 
-	slog.Info("triggering restore via cron workload", "table", req.TableName, "filename", req.Filename, "workload", backupWorkload)
+	slog.Info("triggering restore via cron workload", "table", req.TableName, "type", req.Type, "filename", req.Filename, "workload", backupWorkload)
 	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start restore: %v", err))
@@ -1886,7 +1956,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "accepted",
-		"message":   fmt.Sprintf("restore started for table %s from %s", req.TableName, req.Filename),
+		"message":   fmt.Sprintf("%s restore started for table %s from %s", req.Type, req.TableName, req.Filename),
 		"commandId": cmd.ID,
 	})
 }

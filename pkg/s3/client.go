@@ -245,13 +245,18 @@ type BackupFile struct {
 }
 
 // ListBackups lists backup files for a specific table from S3
-// Files are expected to be named: {tableName}_delta-{timestamp}.sql.gz
-func (c *Client) ListBackups(ctx context.Context, prefix, tableName string) ([]BackupFile, error) {
+// backupType: "delta" searches for {tableName}_delta-, "main" searches for {tableName}_main_
+func (c *Client) ListBackups(ctx context.Context, prefix, tableName, backupType string) ([]BackupFile, error) {
 	// Ensure prefix doesn't have trailing slash
 	prefix = strings.TrimSuffix(prefix, "/")
 
-	// Build the search prefix: {prefix}/{tableName}_delta-
-	searchPrefix := fmt.Sprintf("%s/%s_delta-", prefix, tableName)
+	// Build the search prefix based on backup type
+	var searchPrefix string
+	if backupType == "main" {
+		searchPrefix = fmt.Sprintf("%s/%s_main_", prefix, tableName)
+	} else {
+		searchPrefix = fmt.Sprintf("%s/%s_delta-", prefix, tableName)
+	}
 
 	paginator := s3.NewListObjectsV2Paginator(c.s3Client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(c.bucket),

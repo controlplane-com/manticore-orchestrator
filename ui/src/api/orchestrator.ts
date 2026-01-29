@@ -136,8 +136,8 @@ export const executeSqlQuery = async (
 };
 
 // Get backup files for a table (authenticated)
-export const getBackupFiles = async (tableName: string): Promise<BackupFilesResponse> => {
-  const response = await api.get(`/backups/files?tableName=${encodeURIComponent(tableName)}`);
+export const getBackupFiles = async (tableName: string, type: string = 'delta'): Promise<BackupFilesResponse> => {
+  const response = await api.get(`/backups/files?tableName=${encodeURIComponent(tableName)}&type=${encodeURIComponent(type)}`);
   return response.data;
 };
 

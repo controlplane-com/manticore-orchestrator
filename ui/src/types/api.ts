@@ -149,6 +149,7 @@ export interface CommandHistoryResponse {
 // Backup request - sent when triggering backup
 export interface BackupRequest {
   tableName: string;
+  type?: 'delta' | 'main';
 }
 
 // Backup status from /api/backups
@@ -241,4 +242,5 @@ export interface BackupFilesResponse {
 export interface RestoreRequest {
   tableName: string;
   filename: string;
+  type?: 'delta' | 'main';
 }

@@ -29,6 +29,8 @@ export const Dashboard = () => {
   const [selectedBackupTable, setSelectedBackupTable] = useState('');
   const [selectedRestoreTable, setSelectedRestoreTable] = useState('');
   const [selectedBackupFile, setSelectedBackupFile] = useState('');
+  const [backupType, setBackupType] = useState<'delta' | 'main'>('delta');
+  const [restoreType, setRestoreType] = useState<'delta' | 'main'>('delta');
   const [commandFilter, setCommandFilter] = useState<'all' | 'import' | 'repair' | 'backup' | 'restore'>('all');
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
@@ -112,8 +114,8 @@ export const Dashboard = () => {
 
   // Fetch backup files for the selected restore table
   const { data: backupFilesData, isLoading: backupFilesLoading } = useQuery({
-    queryKey: ['backup-files', selectedRestoreTable],
-    queryFn: () => getBackupFiles(selectedRestoreTable),
+    queryKey: ['backup-files', selectedRestoreTable, restoreType],
+    queryFn: () => getBackupFiles(selectedRestoreTable, restoreType),
     enabled: !!selectedRestoreTable,
     refetchInterval: 60000, // Refresh every minute
   });
@@ -131,10 +133,10 @@ export const Dashboard = () => {
     }
   }, [configData, selectedTable, selectedBackupTable, selectedRestoreTable]);
 
-  // Clear selected backup file when restore table changes
+  // Clear selected backup file when restore table or type changes
   useEffect(() => {
     setSelectedBackupFile('');
-  }, [selectedRestoreTable]);
+  }, [selectedRestoreTable, restoreType]);
 
   // Build table options for select
   const tableOptions = configData?.tables?.map(t => ({
@@ -186,7 +188,7 @@ export const Dashboard = () => {
   });
 
   const backupMutation = useMutation({
-    mutationFn: () => backupTable({ tableName: selectedBackupTable }),
+    mutationFn: () => backupTable({ tableName: selectedBackupTable, type: backupType }),
     onSuccess: (data) => {
       toast.success('Backup started', data.message);
       queryClient.invalidateQueries({ queryKey: ['backups'] });
@@ -198,7 +200,7 @@ export const Dashboard = () => {
   });
 
   const restoreMutation = useMutation({
-    mutationFn: () => restoreTable({ tableName: selectedRestoreTable, filename: selectedBackupFile }),
+    mutationFn: () => restoreTable({ tableName: selectedRestoreTable, filename: selectedBackupFile, type: restoreType }),
     onSuccess: (data) => {
       toast.success('Restore started', data.message);
       queryClient.invalidateQueries({ queryKey: ['command-history'] });
@@ -240,12 +242,12 @@ export const Dashboard = () => {
           : 'Repair cluster using auto-selected source replica? The system will choose the best source automatically.',
       },
       backup: {
-        title: 'Backup Delta Table',
-        message: `Are you sure you want to backup the delta table for "${selectedBackupTable}"? This will dump ${selectedBackupTable}_delta and upload it to cloud storage.`,
+        title: `Backup ${backupType === 'main' ? 'Main' : 'Delta'} Table`,
+        message: `Are you sure you want to backup the ${backupType} table for "${selectedBackupTable}"? This will create a physical backup and upload it to cloud storage.`,
       },
       restore: {
-        title: 'Restore Delta Table',
-        message: `Are you sure you want to restore "${selectedRestoreTable}_delta" from backup "${selectedBackupFile}"? This will overwrite the current delta table data.`,
+        title: `Restore ${restoreType === 'main' ? 'Main' : 'Delta'} Table`,
+        message: `Are you sure you want to restore "${selectedRestoreTable}" ${restoreType} table from backup "${selectedBackupFile}"? This will overwrite the current ${restoreType} table data.`,
       },
     };
 
@@ -491,10 +493,10 @@ export const Dashboard = () => {
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <CloudArrowUpIcon className="h-5 w-5 text-cpln-cyan" />
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Backup Delta</h3>
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Backup {backupType === 'main' ? 'Main' : 'Delta'}</h3>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Backup a table's delta data to cloud storage.
+              Backup a table's {backupType} data to cloud storage.
             </p>
 
             <div className="space-y-4">
@@ -502,12 +504,23 @@ export const Dashboard = () => {
                 {configLoading ? (
                   <LoadingSpinner size="sm" />
                 ) : tableOptions.length > 0 ? (
-                  <FormSelect
-                    label="Select Table"
-                    value={selectedBackupTable}
-                    onChange={setSelectedBackupTable}
-                    options={tableOptions}
-                  />
+                  <>
+                    <FormSelect
+                      label="Select Table"
+                      value={selectedBackupTable}
+                      onChange={setSelectedBackupTable}
+                      options={tableOptions}
+                    />
+                    <FormSelect
+                      label="Type"
+                      value={backupType}
+                      onChange={(v) => setBackupType(v as 'delta' | 'main')}
+                      options={[
+                        { value: 'delta', label: 'Delta' },
+                        { value: 'main', label: 'Main' },
+                      ]}
+                    />
+                  </>
                 ) : (
                   <p className="text-gray-500 dark:text-gray-400">No tables configured</p>
                 )}
@@ -539,10 +552,10 @@ export const Dashboard = () => {
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <CloudArrowDownIcon className="h-5 w-5 text-cpln-cyan" />
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Restore Delta</h3>
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Restore {restoreType === 'main' ? 'Main' : 'Delta'}</h3>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Restore a table's delta data from a cloud backup.
+              Restore a table's {restoreType} data from a cloud backup.
             </p>
 
             <div className="space-y-4">
@@ -550,12 +563,23 @@ export const Dashboard = () => {
                 {configLoading ? (
                   <LoadingSpinner size="sm" />
                 ) : tableOptions.length > 0 ? (
-                  <FormSelect
-                    label="Select Table"
-                    value={selectedRestoreTable}
-                    onChange={setSelectedRestoreTable}
-                    options={tableOptions}
-                  />
+                  <>
+                    <FormSelect
+                      label="Select Table"
+                      value={selectedRestoreTable}
+                      onChange={setSelectedRestoreTable}
+                      options={tableOptions}
+                    />
+                    <FormSelect
+                      label="Type"
+                      value={restoreType}
+                      onChange={(v) => setRestoreType(v as 'delta' | 'main')}
+                      options={[
+                        { value: 'delta', label: 'Delta' },
+                        { value: 'main', label: 'Main' },
+                      ]}
+                    />
+                  </>
                 ) : (
                   <p className="text-gray-500 dark:text-gray-400">No tables configured</p>
                 )}
