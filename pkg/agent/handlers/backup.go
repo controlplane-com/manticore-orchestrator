@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -188,8 +191,17 @@ func (h *Handler) executeBackup(job *types.BackupJob) {
 
 	slog.Info("executing manticore-backup", "jobId", job.ID, "table", job.Table, "backupDir", job.BackupDir)
 
+	// Create backup directory (manticore-backup expects it to exist)
+	if err := os.MkdirAll(job.BackupDir, 0755); err != nil {
+		errMsg := fmt.Sprintf("failed to create backup directory %s: %v", job.BackupDir, err)
+		slog.Error("backup failed", "jobId", job.ID, "error", errMsg)
+		backupJobs.updateStatus(job.ID, types.BackupJobStatusFailed, errMsg)
+		return
+	}
+
 	// Run manticore-backup
 	cmd := exec.CommandContext(ctx, "manticore-backup",
+		"--config=/var/lib/manticore/manticore-runtime.conf",
 		"--backup-dir="+job.BackupDir,
 		"--tables="+job.Table,
 	)
@@ -206,9 +218,9 @@ func (h *Handler) executeBackup(job *types.BackupJob) {
 	backupJobs.updateStatus(job.ID, types.BackupJobStatusCompleted, "")
 }
 
-// executeRestore handles cluster operations and runs manticore-backup --restore
+// executeRestore handles cluster operations and imports table from backup data
 func (h *Handler) executeRestore(job *types.BackupJob) {
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	backupJobs.setCancelFunc(job.ID, cancel)
@@ -226,7 +238,7 @@ func (h *Handler) executeRestore(job *types.BackupJob) {
 		}
 	}
 
-	// Step 2: Drop the table so manticore-backup --restore can recreate it
+	// Step 2: Drop the table so IMPORT TABLE can recreate it
 	slog.Info("dropping table for restore", "table", job.Table)
 	dropTableSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", job.Table)
 	if err := h.client.Execute(dropTableSQL); err != nil {
@@ -236,22 +248,44 @@ func (h *Handler) executeRestore(job *types.BackupJob) {
 		return
 	}
 
-	// Step 3: Run manticore-backup --restore
-	slog.Info("running manticore-backup --restore", "jobId", job.ID, "backupDir", job.BackupDir)
-	cmd := exec.CommandContext(ctx, "manticore-backup",
-		"--backup-dir="+job.BackupDir,
-		"--restore",
-		"--tables="+job.Table,
-	)
+	// Step 3: Import table from backup data using IMPORT TABLE
+	// manticore-backup stores data files at: backupDir/data/tableName/tableName.*
+	// IMPORT TABLE creates a clean local table without stale cluster metadata
+	slog.Info("importing table from backup data", "jobId", job.ID, "backupDir", job.BackupDir)
 
-	output, err := cmd.CombinedOutput()
+	var importPath string
+	err := filepath.WalkDir(job.BackupDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() && d.Name() == job.Table+".meta" {
+			importPath = strings.TrimSuffix(path, ".meta")
+			return filepath.SkipAll
+		}
+		return nil
+	})
 	if err != nil {
-		errMsg := fmt.Sprintf("manticore-backup --restore failed: %v, output: %s", err, string(output))
+		errMsg := fmt.Sprintf("failed to search backup directory for table data: %v", err)
 		slog.Error("restore failed", "jobId", job.ID, "error", errMsg)
 		backupJobs.updateStatus(job.ID, types.BackupJobStatusFailed, errMsg)
 		return
 	}
-	slog.Info("manticore-backup --restore completed", "jobId", job.ID, "output", string(output))
+	if importPath == "" {
+		errMsg := fmt.Sprintf("table data files not found in backup directory: %s (looking for %s.meta)", job.BackupDir, job.Table)
+		slog.Error("restore failed", "jobId", job.ID, "error", errMsg)
+		backupJobs.updateStatus(job.ID, types.BackupJobStatusFailed, errMsg)
+		return
+	}
+
+	importSQL := fmt.Sprintf("IMPORT TABLE %s FROM '%s'", job.Table, importPath)
+	slog.Info("executing IMPORT TABLE", "jobId", job.ID, "table", job.Table, "importPath", importPath)
+	if err := h.client.Execute(importSQL); err != nil {
+		errMsg := fmt.Sprintf("IMPORT TABLE failed: %v", err)
+		slog.Error("restore failed", "jobId", job.ID, "error", errMsg)
+		backupJobs.updateStatus(job.ID, types.BackupJobStatusFailed, errMsg)
+		return
+	}
+	slog.Info("IMPORT TABLE completed", "jobId", job.ID, "table", job.Table)
 
 	// Step 4: Re-add table to cluster
 	slog.Info("re-adding table to cluster after restore", "table", job.Table, "cluster", h.clusterName)

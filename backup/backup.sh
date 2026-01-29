@@ -84,6 +84,9 @@ if [ "${ACTION}" = "backup" ]; then
   echo "[INFO] Starting physical backup of ${TABLE_NAME} (${TIMESTAMP})"
   echo "[INFO] Backup directory: ${BACKUP_DIR}"
 
+  # Create backup directory on shared volume (manticore-backup expects it to exist)
+  mkdir -p "${BACKUP_DIR}"
+
   # Step 1: Call agent to run manticore-backup
   echo "[INFO] Requesting agent to run manticore-backup..."
   RESPONSE=$(curl -sf -X POST \
@@ -103,7 +106,8 @@ if [ "${ACTION}" = "backup" ]; then
 
   echo "[INFO] Backup job started: ${JOB_ID}"
 
-  # Step 2: Poll agent until backup completes
+  # Step 2: Poll agent until backup completes (initial delay to let job start)
+  sleep 15
   if ! poll_agent_job "backup" "${JOB_ID}"; then
     echo "[ERROR] Backup failed"
     rm -rf "${BACKUP_DIR}" 2>/dev/null || true
@@ -185,7 +189,8 @@ elif [ "${ACTION}" = "restore" ]; then
 
   echo "[INFO] Restore job started: ${JOB_ID}"
 
-  # Step 4: Poll agent until restore completes
+  # Step 4: Poll agent until restore completes (initial delay to let job start)
+  sleep 15
   if ! poll_agent_job "restore" "${JOB_ID}"; then
     echo "[ERROR] Restore failed"
     rm -rf "${RESTORE_DIR}" 2>/dev/null || true

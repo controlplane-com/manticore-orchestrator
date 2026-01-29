@@ -7,6 +7,7 @@ RUN apt-get update \
     ca-certificates \
     curl \
     gnupg \
+    jq \
     unzip \
  && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
     | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
