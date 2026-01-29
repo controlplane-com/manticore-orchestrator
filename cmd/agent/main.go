@@ -186,6 +186,12 @@ func main() {
 	api.HandleFunc("/import/{jobId}", h.GetImportStatus).Methods("GET")
 	api.HandleFunc("/import/{jobId}", h.CancelImport).Methods("DELETE")
 
+	// Backup/restore operations (async with polling)
+	api.HandleFunc("/backup", h.StartBackup).Methods("POST")
+	api.HandleFunc("/backup/{jobId}", h.GetBackupStatus).Methods("GET")
+	api.HandleFunc("/restore", h.StartRestore).Methods("POST")
+	api.HandleFunc("/restore/{jobId}", h.GetRestoreStatus).Methods("GET")
+
 	// Create HTTP server with graceful shutdown support
 	server := &http.Server{
 		Addr:    listenAddr,

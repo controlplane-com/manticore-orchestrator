@@ -272,8 +272,8 @@ func (c *Client) ListBackups(ctx context.Context, prefix, tableName string) ([]B
 				filename = filename[idx+1:]
 			}
 
-			// Only include .sql.gz files
-			if !strings.HasSuffix(filename, ".sql.gz") {
+			// Only include .tar.gz files (physical backups from manticore-backup)
+			if !strings.HasSuffix(filename, ".tar.gz") {
 				continue
 			}
 

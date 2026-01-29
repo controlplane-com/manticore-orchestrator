@@ -1661,6 +1661,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 			Env: []cpln.EnvVar{
 				{Name: "ACTION", Value: "backup"},
 				{Name: "DATASET", Value: req.TableName},
+				{Name: "TYPE", Value: "delta"},
 			},
 		},
 	}
@@ -1868,6 +1869,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			Env: []cpln.EnvVar{
 				{Name: "ACTION", Value: "restore"},
 				{Name: "DATASET", Value: req.TableName},
+				{Name: "TYPE", Value: "delta"},
 				{Name: "RESTORE_FILE", Value: req.Filename},
 			},
 		},

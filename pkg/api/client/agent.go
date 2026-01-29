@@ -499,3 +499,59 @@ func (c *AgentClient) GetTableConfig(tableName string, maxRetries int) (*TableCo
 	}
 	return &resp, nil
 }
+
+// StartBackup initiates an async backup and returns the job ID
+func (c *AgentClient) StartBackup(req types.BackupRequest, maxRetries int) (string, error) {
+	body, err := c.doRequest("POST", "/api/backup", req, maxRetries)
+	if err != nil {
+		return "", err
+	}
+
+	var resp types.StartBackupResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	return resp.JobID, nil
+}
+
+// GetBackupStatus returns the status of a backup job
+func (c *AgentClient) GetBackupStatus(jobID string, maxRetries int) (*types.BackupJob, error) {
+	body, err := c.doRequest("GET", fmt.Sprintf("/api/backup/%s", jobID), nil, maxRetries)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp types.BackupJobResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return resp.Job, nil
+}
+
+// StartRestore initiates an async restore and returns the job ID
+func (c *AgentClient) StartRestore(req types.RestoreRequest, maxRetries int) (string, error) {
+	body, err := c.doRequest("POST", "/api/restore", req, maxRetries)
+	if err != nil {
+		return "", err
+	}
+
+	var resp types.StartBackupResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	return resp.JobID, nil
+}
+
+// GetRestoreStatus returns the status of a restore job
+func (c *AgentClient) GetRestoreStatus(jobID string, maxRetries int) (*types.BackupJob, error) {
+	body, err := c.doRequest("GET", fmt.Sprintf("/api/restore/%s", jobID), nil, maxRetries)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp types.BackupJobResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return resp.Job, nil
+}
