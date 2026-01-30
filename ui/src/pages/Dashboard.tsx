@@ -369,10 +369,10 @@ export const Dashboard = () => {
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <ArrowPathIcon className="h-5 w-5 text-cpln-cyan" />
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Import Data</h3>
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Import Main</h3>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Import data for a specific table using blue-green deployment.
+              Import main table data using blue-green deployment.
             </p>
 
             <div className="space-y-4">
@@ -493,10 +493,10 @@ export const Dashboard = () => {
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <CloudArrowUpIcon className="h-5 w-5 text-cpln-cyan" />
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Backup {backupType === 'main' ? 'Main' : 'Delta'}</h3>
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Backup</h3>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Backup a table's {backupType} data to cloud storage.
+              Backup a table to cloud storage.
             </p>
 
             <div className="space-y-4">
@@ -552,10 +552,10 @@ export const Dashboard = () => {
           <Card className="p-6">
             <div className="flex items-center gap-2 mb-4">
               <CloudArrowDownIcon className="h-5 w-5 text-cpln-cyan" />
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Restore {restoreType === 'main' ? 'Main' : 'Delta'}</h3>
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Restore</h3>
             </div>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Restore a table's {restoreType} data from a cloud backup.
+              Restore a table from a cloud backup.
             </p>
 
             <div className="space-y-4">
@@ -683,7 +683,7 @@ export const Dashboard = () => {
                       cmd.action === 'backup' ? 'purple' :
                       cmd.action === 'restore' ? 'cyan' : 'warning'
                     }>
-                      {cmd.action}
+                      {cmd.action}{(cmd.action === 'backup' || cmd.action === 'restore') && cmd.type ? ` ${cmd.type}` : ''}
                     </Badge>
                     <span className="font-medium text-gray-900 dark:text-white">
                       {cmd.action === 'import' || cmd.action === 'backup' || cmd.action === 'restore'

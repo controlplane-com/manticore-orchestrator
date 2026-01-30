@@ -136,6 +136,7 @@ export interface CommandHistoryEntry {
   id: string;
   action: 'import' | 'repair' | 'backup' | 'restore';
   tableName?: string; // for imports, backups, and restores
+  type?: 'delta' | 'main'; // for backups and restores
   sourceReplica?: number; // only for repairs
   lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
   created: string; // ISO timestamp

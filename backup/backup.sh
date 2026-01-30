@@ -43,6 +43,8 @@ poll_agent_job() {
   while true; do
     local response
     response=$(curl -sf \
+      --connect-timeout 5 \
+      --max-time 30 \
       -H "Authorization: Bearer ${AUTH_TOKEN}" \
       "${AGENT_URL}/api/${endpoint}/${job_id}" 2>/dev/null) || {
       echo "[WARN] Failed to poll job status, retrying in ${poll_interval}s..."
@@ -115,8 +117,9 @@ if [ "${ACTION}" = "backup" ]; then
   fi
 
   # Step 3: Create tar.gz from backup directory
-  echo "[INFO] Creating archive: ${FILENAME}"
+  echo "[INFO] Compressing backup into archive: ${FILENAME}"
   tar -czf "/tmp/${FILENAME}" -C "${BACKUP_DIR}" .
+  echo "[INFO] Archive created, uploading to cloud storage..."
 
   # Step 4: Upload to cloud storage
   if [ "${BACKUP_PROVIDER}" = "gcp" ]; then

@@ -1197,6 +1197,16 @@ func extractActionFromCommand(cmd cpln.Command) string {
 
 // extractDatasetFromCommand extracts the DATASET env var from a runCronWorkload command
 func extractDatasetFromCommand(cmd cpln.Command) string {
+	return extractEnvFromCommand(cmd, "DATASET")
+}
+
+// extractTypeFromCommand extracts the TYPE env var from a runCronWorkload command
+func extractTypeFromCommand(cmd cpln.Command) string {
+	return extractEnvFromCommand(cmd, "TYPE")
+}
+
+// extractEnvFromCommand extracts a named env var from a runCronWorkload command's containerOverrides
+func extractEnvFromCommand(cmd cpln.Command, envName string) string {
 	overrides, ok := cmd.Spec["containerOverrides"].([]interface{})
 	if !ok {
 		return ""
@@ -1215,7 +1225,7 @@ func extractDatasetFromCommand(cmd cpln.Command) string {
 			if !ok {
 				continue
 			}
-			if ev["name"] == "DATASET" {
+			if ev["name"] == envName {
 				if val, ok := ev["value"].(string); ok {
 					return val
 				}
@@ -1384,8 +1394,9 @@ func extractSourceReplicaFromCommand(cmd cpln.Command) *int {
 // CommandHistoryEntry represents a command in the history
 type CommandHistoryEntry struct {
 	ID             string `json:"id"`
-	Action         string `json:"action"`                  // "import", "repair", or "backup"
-	TableName      string `json:"tableName,omitempty"`     // for imports and backups
+	Action         string `json:"action"`                  // "import", "repair", "backup", or "restore"
+	TableName      string `json:"tableName,omitempty"`     // for imports, backups, and restores
+	Type           string `json:"type,omitempty"`          // "delta" or "main" for backups and restores
 	SourceReplica  *int   `json:"sourceReplica,omitempty"` // only for repairs
 	LifecycleStage string `json:"lifecycleStage"`
 	Created        string `json:"created"` // ISO timestamp for sorting
@@ -1460,10 +1471,12 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 				if dataset == "" {
 					continue
 				}
+				backupType := extractTypeFromCommand(cmd)
 				history = append(history, CommandHistoryEntry{
 					ID:             cmd.ID,
 					Action:         action,
 					TableName:      dataset,
+					Type:           backupType,
 					LifecycleStage: cmd.LifecycleStage,
 					Created:        cmd.Created,
 				})
