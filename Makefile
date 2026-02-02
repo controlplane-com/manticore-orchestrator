@@ -44,7 +44,7 @@ build-ui: ## Build UI image
 
 build-backup: ## Build backup image
 	@echo "Building $(BACKUP_IMAGE):$(VERSION) for $(PLATFORM)"
-	docker buildx build --platform $(PLATFORM) -f ./backup/Dockerfile -t $(BACKUP_IMAGE):$(VERSION) --load ./backup
+	docker buildx build --platform $(PLATFORM) -f ./build/backup/Dockerfile -t $(BACKUP_IMAGE):$(VERSION) --load .
 	@echo "Built $(BACKUP_IMAGE):$(VERSION)"
 
 build-all: build-api build-agent build-ui build-backup ## Build all images
