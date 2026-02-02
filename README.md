@@ -32,35 +32,102 @@ Here you can
 - Restore delta tables from backup with file selection
 - View import, repair, backup, and restore operation history
 
-### Delta Table Backup & Restore ###
-The Orchestrator provides cloud storage backup and restore for delta tables:
-- **Backup**: Export delta table data to S3 or GCS with timestamped filenames
-- **Restore**: Select from available backups and restore data with a single click
+### Physical Backup & Restore ###
+The Orchestrator provides physical backup and restore for both delta and main tables using `manticore-backup`:
+- **Backup**: Physical backup of table data to S3 or GCS as compressed tar.gz archives
+- **Restore**: Download and restore from any backup, including blue-green slot rotation for main tables
+- **Scheduled Backups**: Configure cron schedules per table/type directly on the API server
 - **UI Integration**: Manage backups and restores directly from the Dashboard
 
 ## Backup and Restore
 
 ### How It Works
 
-**Backup Process:**
-1. User triggers backup from the Dashboard UI or API
+**Backup Process (delta or main):**
+1. User triggers backup from the Dashboard UI, API, or via cron schedule
 2. API spawns a Control Plane cron workload with `ACTION=backup`
-3. Backup container connects to a Manticore replica via MySQL protocol
-4. `mysqldump` exports the delta table (INSERT statements only, no DROP/CREATE)
-5. SQL file is gzipped and uploaded to cloud storage
-6. File naming: `{tableName}_delta-{timestamp}.sql.gz`
+3. Backup binary calls the Manticore agent to run `manticore-backup` for a physical backup
+4. Agent creates a backup in a shared volume directory
+5. Backup binary compresses the backup directory into a tar.gz archive and streams it to cloud storage (S3 or GCS)
+6. File naming: `{tableName}-{timestamp}.tar.gz` (e.g., `addresses_delta-2025-01-28T22-50-49Z.tar.gz`)
 
-**Restore Process:**
-1. User selects a table and backup file from the Dashboard UI
+**Restore Process (delta):**
+1. User selects a table and backup file from the Dashboard UI or API
 2. API spawns a cron workload with `ACTION=restore` and `RESTORE_FILE={filename}`
-3. Backup container downloads the backup file from cloud storage
-4. Existing delta table data is cleared (`DELETE FROM cluster:table WHERE id > 0`)
-5. SQL file is modified to add cluster prefix to table names
-6. Data is restored via MySQL protocol
+3. Backup binary downloads and extracts the tar.gz archive from cloud storage to a shared volume
+4. Agent removes the table from the cluster, drops it, and uses `IMPORT TABLE` to restore from backup files
+5. Agent re-adds the table to the cluster
 
-### Configuration
+**Restore Process (main - blue-green):**
+1. Same as delta steps 1-4, except the restore targets the **inactive** slot (e.g., if slot `a` is active, restore goes to slot `b`)
+2. If `BACKUP_SLOT` is set and the backup came from a different slot, the agent handles file name remapping automatically via `sourceTable`
+3. After the agent restore completes, the backup binary calls the orchestrator's `/api/rotate-main` endpoint
+4. The orchestrator atomically rotates the distributed table to point at the newly restored slot and drops the old slot
 
-The backup system requires these environment variables:
+### Backup Scheduling
+
+The orchestrator API server includes a built-in cron scheduler for automated backups. This is useful because each table may need multiple backup schedules (e.g., delta every 6 hours, main once daily), but CPLN cron workloads only support a single schedule.
+
+#### Configuration
+
+Set the `BACKUP_SCHEDULES` environment variable on the API server as a JSON array:
+
+```json
+[
+  {"table": "addresses", "type": "delta", "schedule": "0 */6 * * *"},
+  {"table": "addresses", "type": "main", "schedule": "0 2 * * *"}
+]
+```
+
+Each entry has:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `table` | Table base name (without `_delta`/`_main_` suffix) | `addresses` |
+| `type` | Backup type: `delta` or `main` | `delta` |
+| `schedule` | Standard 5-field cron expression | `0 */6 * * *` |
+
+The scheduler uses standard 5-field cron format: `minute hour day-of-month month day-of-week`.
+
+**Common schedule examples:**
+- `0 */6 * * *` - Every 6 hours
+- `0 2 * * *` - Daily at 2:00 AM
+- `0 0 * * 0` - Weekly on Sunday at midnight
+- `*/30 * * * *` - Every 30 minutes
+
+#### Behavior
+
+- If `BACKUP_SCHEDULES` is empty or unset, no scheduler is created (zero overhead)
+- Invalid cron expressions are logged and skipped; other schedules still work
+- The scheduler checks for active backup conflicts before triggering (if a backup is already running for the same table, it skips)
+- On `SIGTERM`, the scheduler stops cleanly before the API server shuts down
+- Manual backups via `POST /api/backup` continue to work alongside scheduled backups
+
+### Backup Container Environment Variables
+
+The backup binary (runs as a CPLN cron workload) reads these environment variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ACTION` | Yes | | `backup` or `restore` |
+| `AUTH_TOKEN` | Yes | | Bearer token for agent API authentication |
+| `DATASET` | Yes | | Table base name (e.g., `addresses`) |
+| `TYPE` | No | `delta` | `delta` or `main` |
+| `SLOT` | When TYPE=main | | Active slot: `a` or `b` |
+| `MANTICORE_HOST` | Yes | | Agent hostname |
+| `AGENT_PORT` | No | `8080` | Agent API port |
+| `SHARED_VOLUME_MOUNT` | No | `/mnt/shared` | Shared volume mount path |
+| `BACKUP_PROVIDER` | Yes | | `aws` or `gcp` |
+| `BACKUP_BUCKET` | Yes | | Cloud storage bucket name |
+| `BACKUP_PREFIX` | Yes | | Path prefix within bucket |
+| `BACKUP_REGION` | No | | AWS region (required for S3) |
+| `RESTORE_FILE` | For restore | | Backup filename to restore from |
+| `BACKUP_SLOT` | For blue-green | | Slot the backup was taken from |
+| `ORCHESTRATOR_API_URL` | For blue-green | | Orchestrator URL for rotation call |
+
+### API Server Backup Environment Variables
+
+The orchestrator API server needs these for backup operations:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
@@ -68,19 +135,8 @@ The backup system requires these environment variables:
 | `BACKUP_BUCKET` | Storage bucket name | `my-backup-bucket` |
 | `BACKUP_PREFIX` | Prefix/folder for backup files | `manticore-backups` |
 | `BACKUP_REGION` | AWS region (if using S3) | `us-east-1` |
-| `DATASET` | Table name (without `_delta` suffix) | `addresses_full` |
-| `MANTICORE_HOST` | Manticore replica hostname | `manticore-0.manticore` |
-| `MANTICORE_PORT` | MySQL protocol port | `9306` |
-| `CLUSTER_NAME` | Manticore cluster name (default: `manticore`) | `manticore` |
-
-### Clustered Table Considerations
-
-ManticoreSearch clustered tables require special handling:
-
-- **Cluster prefix required**: All DML operations must use `cluster:tablename` format (e.g., `manticore:addresses_full_delta`)
-- **No DROP/CREATE**: Clustered tables cannot be dropped or recreated; backups contain only INSERT statements
-- **No TRUNCATE**: Use `DELETE FROM table WHERE id > 0` to clear data
-- **Single-node writes**: Write operations should target one replica; data replicates automatically
+| `BACKUP_WORKLOAD` | Name of the CPLN cron workload for backups | `manticore-backup` |
+| `BACKUP_SCHEDULES` | JSON array of scheduled backups (optional) | See above |
 
 ## API Reference
 
@@ -88,23 +144,34 @@ ManticoreSearch clustered tables require special handling:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/backups` | Get active backup operations |
-| GET | `/api/backups/files?tableName={name}` | List backup files for a table |
-| POST | `/api/backup` | Trigger backup for a table's delta |
-| POST | `/api/restore` | Restore a table from backup |
+| GET | `/api/backups` | Get active backup/restore operations |
+| GET | `/api/backups/files?tableName={name}` | List backup files for a table in cloud storage |
+| POST | `/api/backup` | Trigger a backup for a table |
+| POST | `/api/restore` | Restore a table from a backup file |
+| POST | `/api/rotate-main` | Rotate the distributed table to a new main slot (called by backup binary) |
 
 **Backup Request:**
 ```json
 {
-  "tableName": "addresses_full"
+  "tableName": "addresses",
+  "type": "delta"
 }
 ```
 
 **Restore Request:**
 ```json
 {
-  "tableName": "addresses_full",
-  "filename": "addresses_full_delta-2024-01-28T22-50-49Z.sql.gz"
+  "tableName": "addresses",
+  "filename": "addresses_delta-2025-01-28T22-50-49Z.tar.gz"
+}
+```
+
+**Rotate Main Request** (typically called by the backup binary, not manually):
+```json
+{
+  "tableName": "addresses",
+  "newSlot": "b",
+  "oldSlot": "a"
 }
 ```
 

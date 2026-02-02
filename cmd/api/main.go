@@ -180,10 +180,14 @@ func main() {
 
 	// Parse backup schedules from JSON env var
 	if raw := getEnv("BACKUP_SCHEDULES", ""); raw != "" {
+		slog.Info("parsing BACKUP_SCHEDULES", "raw", raw)
 		if err := json.Unmarshal([]byte(raw), &config.BackupSchedules); err != nil {
-			slog.Error("failed to parse BACKUP_SCHEDULES", "error", err)
+			slog.Error("failed to parse BACKUP_SCHEDULES", "error", err, "raw", raw)
 			os.Exit(1)
 		}
+		slog.Info("parsed backup schedules", "count", len(config.BackupSchedules))
+	} else {
+		slog.Info("BACKUP_SCHEDULES not configured, scheduled backups disabled")
 	}
 
 	if config.AuthToken == "" {
@@ -297,20 +301,29 @@ func runServer(config Config) {
 		server.cronScheduler = cron.New()
 		for _, entry := range config.BackupSchedules {
 			entry := entry // capture loop var
-			_, err := server.cronScheduler.AddFunc(entry.Schedule, func() {
-				slog.Info("cron triggered backup", "table", entry.Table, "type", entry.Type)
+			entryID, err := server.cronScheduler.AddFunc(entry.Schedule, func() {
+				slog.Info("cron triggered backup", "table", entry.Table, "type", entry.Type, "schedule", entry.Schedule)
 				if _, err := server.triggerBackup(entry.Table, entry.Type); err != nil {
 					slog.Error("scheduled backup failed", "table", entry.Table, "type", entry.Type, "error", err)
+				} else {
+					slog.Info("scheduled backup triggered successfully", "table", entry.Table, "type", entry.Type)
 				}
 			})
 			if err != nil {
 				slog.Error("invalid cron schedule, skipping entry", "table", entry.Table, "type", entry.Type, "schedule", entry.Schedule, "error", err)
 				continue
 			}
-			slog.Info("registered backup schedule", "table", entry.Table, "type", entry.Type, "schedule", entry.Schedule)
+			slog.Info("registered backup schedule", "table", entry.Table, "type", entry.Type, "schedule", entry.Schedule, "entryId", entryID)
 		}
 		server.cronScheduler.Start()
+
+		// Log next fire time for each registered schedule
+		for _, cronEntry := range server.cronScheduler.Entries() {
+			slog.Info("scheduled backup next fire", "entryId", cronEntry.ID, "nextRun", cronEntry.Next.Format(time.RFC3339))
+		}
 		slog.Info("backup scheduler started", "scheduleCount", len(config.BackupSchedules))
+	} else {
+		slog.Info("no backup schedules configured, scheduler not started")
 	}
 
 	// Start HTTP server with graceful shutdown
