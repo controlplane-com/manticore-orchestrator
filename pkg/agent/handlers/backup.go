@@ -93,6 +93,14 @@ func (m *backupJobManager) setCancelFunc(id string, cancel context.CancelFunc) {
 	}
 }
 
+func (m *backupJobManager) setSourceTable(id string, sourceTable string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if state, ok := m.jobs[id]; ok {
+		state.job.SourceTable = sourceTable
+	}
+}
+
 // StartBackup starts an async backup job and returns immediately with a job ID
 func (h *Handler) StartBackup(w http.ResponseWriter, r *http.Request) {
 	var req types.BackupRequest
@@ -155,7 +163,11 @@ func (h *Handler) StartRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := backupJobs.createJob(req.Table, "restore", req.BackupDir)
-	slog.Info("starting restore job", "jobId", job.ID, "table", req.Table, "backupDir", req.BackupDir)
+	if req.SourceTable != "" {
+		job.SourceTable = req.SourceTable
+		backupJobs.setSourceTable(job.ID, req.SourceTable)
+	}
+	slog.Info("starting restore job", "jobId", job.ID, "table", req.Table, "sourceTable", req.SourceTable, "backupDir", req.BackupDir)
 
 	go h.executeRestore(job)
 
@@ -251,14 +263,20 @@ func (h *Handler) executeRestore(job *types.BackupJob) {
 	// Step 3: Import table from backup data using IMPORT TABLE
 	// manticore-backup stores data files at: backupDir/data/tableName/tableName.*
 	// IMPORT TABLE creates a clean local table without stale cluster metadata
-	slog.Info("importing table from backup data", "jobId", job.ID, "backupDir", job.BackupDir)
+	// When SourceTable is set (blue-green restore), backup files are named after the source table
+	// but we create the table with the target name (job.Table)
+	lookupName := job.Table
+	if job.SourceTable != "" {
+		lookupName = job.SourceTable
+	}
+	slog.Info("importing table from backup data", "jobId", job.ID, "targetTable", job.Table, "lookupName", lookupName, "backupDir", job.BackupDir)
 
 	var importPath string
 	err := filepath.WalkDir(job.BackupDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if !d.IsDir() && d.Name() == job.Table+".meta" {
+		if !d.IsDir() && d.Name() == lookupName+".meta" {
 			importPath = strings.TrimSuffix(path, ".meta")
 			return filepath.SkipAll
 		}
@@ -271,7 +289,7 @@ func (h *Handler) executeRestore(job *types.BackupJob) {
 		return
 	}
 	if importPath == "" {
-		errMsg := fmt.Sprintf("table data files not found in backup directory: %s (looking for %s.meta)", job.BackupDir, job.Table)
+		errMsg := fmt.Sprintf("table data files not found in backup directory: %s (looking for %s.meta)", job.BackupDir, lookupName)
 		slog.Error("restore failed", "jobId", job.ID, "error", errMsg)
 		backupJobs.updateStatus(job.ID, types.BackupJobStatusFailed, errMsg)
 		return

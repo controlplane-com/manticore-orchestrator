@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -24,7 +25,15 @@ import (
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cpln"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/robfig/cron/v3"
 )
+
+// BackupScheduleEntry represents a scheduled backup configuration
+type BackupScheduleEntry struct {
+	Table    string `json:"table"`    // e.g., "addresses"
+	Type     string `json:"type"`     // "main" or "delta"
+	Schedule string `json:"schedule"` // 5-field cron: "0 */6 * * *"
+}
 
 // Config holds the orchestrator configuration
 type Config struct {
@@ -59,14 +68,18 @@ type Config struct {
 	BackupBucket   string // Bucket name for backups
 	BackupPrefix   string // Prefix within bucket (e.g., "backups")
 	BackupRegion   string // AWS region for S3 backups
+
+	// Backup scheduling configuration
+	BackupSchedules []BackupScheduleEntry // from BACKUP_SCHEDULES env var (JSON array)
 }
 
 // Server is the orchestrator REST API server
 type Server struct {
-	config       Config
-	cplnClient   *cpln.Client
-	backupClient *s3.Client // S3 client for backup operations (also works for S3-compatible storage)
-	mu           sync.RWMutex
+	config        Config
+	cplnClient    *cpln.Client
+	backupClient  *s3.Client // S3 client for backup operations (also works for S3-compatible storage)
+	mu            sync.RWMutex
+	cronScheduler *cron.Cron // Background backup scheduler (nil if no schedules configured)
 }
 
 // TableConfig represents a table configuration entry
@@ -165,6 +178,14 @@ func main() {
 		BackupRegion:   getEnv("BACKUP_REGION", "us-east-1"),
 	}
 
+	// Parse backup schedules from JSON env var
+	if raw := getEnv("BACKUP_SCHEDULES", ""); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &config.BackupSchedules); err != nil {
+			slog.Error("failed to parse BACKUP_SCHEDULES", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	if config.AuthToken == "" {
 		slog.Error("AUTH_TOKEN environment variable is required")
 		os.Exit(1)
@@ -257,6 +278,7 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/backups", server.handleBackups)
 	mux.HandleFunc("/api/backups/files", server.handleBackupFiles)
 	mux.HandleFunc("/api/restore", server.handleRestore)
+	mux.HandleFunc("/api/rotate-main", server.handleRotateMain)
 	mux.HandleFunc("/api/repairs", server.handleRepairs)
 	mux.HandleFunc("/api/commands", server.handleCommands)
 	mux.HandleFunc("/api/query", server.handleQuery)
@@ -270,11 +292,54 @@ func runServer(config Config) {
 	// All other endpoints require auth
 	http.Handle("/api/", authMux)
 
-	slog.Info("Manticore Orchestrator REST API starting", "addr", config.ListenAddr, "workload", config.WorkloadName, "gvc", config.GVC, "location", config.Location)
-	if err := http.ListenAndServe(config.ListenAddr, nil); err != nil {
-		slog.Error("server failed", "error", err)
-		os.Exit(1)
+	// Start backup scheduler if schedules are configured
+	if len(config.BackupSchedules) > 0 {
+		server.cronScheduler = cron.New()
+		for _, entry := range config.BackupSchedules {
+			entry := entry // capture loop var
+			_, err := server.cronScheduler.AddFunc(entry.Schedule, func() {
+				slog.Info("cron triggered backup", "table", entry.Table, "type", entry.Type)
+				if _, err := server.triggerBackup(entry.Table, entry.Type); err != nil {
+					slog.Error("scheduled backup failed", "table", entry.Table, "type", entry.Type, "error", err)
+				}
+			})
+			if err != nil {
+				slog.Error("invalid cron schedule, skipping entry", "table", entry.Table, "type", entry.Type, "schedule", entry.Schedule, "error", err)
+				continue
+			}
+			slog.Info("registered backup schedule", "table", entry.Table, "type", entry.Type, "schedule", entry.Schedule)
+		}
+		server.cronScheduler.Start()
+		slog.Info("backup scheduler started", "scheduleCount", len(config.BackupSchedules))
 	}
+
+	// Start HTTP server with graceful shutdown
+	srv := &http.Server{Addr: config.ListenAddr, Handler: nil}
+
+	go func() {
+		slog.Info("Manticore Orchestrator REST API starting", "addr", config.ListenAddr, "workload", config.WorkloadName, "gvc", config.GVC, "location", config.Location)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down server...")
+	if server.cronScheduler != nil {
+		server.cronScheduler.Stop()
+		slog.Info("backup scheduler stopped")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("server shutdown error", "error", err)
+	}
+	slog.Info("server stopped")
 }
 
 // getOrchestratorWorkload returns the orchestrator cron workload name
@@ -1594,45 +1659,23 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBackup handles POST /api/backup - triggers cron workload for backup
-func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Check CPLN client is configured
+// triggerBackup validates and triggers a backup cron workload for the given table and type.
+// Returns the command ID on success, or an error describing what went wrong.
+func (s *Server) triggerBackup(tableName, backupType string) (string, error) {
 	if s.cplnClient == nil {
-		jsonError(w, http.StatusServiceUnavailable, "CPLN API client not configured")
-		return
+		return "", fmt.Errorf("CPLN API client not configured")
 	}
 
-	// Parse request body
-	var req struct {
-		TableName string `json:"tableName"`
-		Type      string `json:"type"` // "delta" (default) or "main"
+	if tableName == "" {
+		return "", fmt.Errorf("tableName is required")
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if req.TableName == "" {
-		jsonError(w, http.StatusBadRequest, "tableName is required")
-		return
-	}
-	if req.Type == "" {
-		req.Type = "delta"
-	}
-	if req.Type != "delta" && req.Type != "main" {
-		jsonError(w, http.StatusBadRequest, "type must be 'delta' or 'main'")
-		return
+	if backupType != "delta" && backupType != "main" {
+		return "", fmt.Errorf("type must be 'delta' or 'main'")
 	}
 
 	// Validate table exists in config
-	if _, err := getCSVPathForTable(s.config.TablesConfig, req.TableName); err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
-		return
+	if _, err := getCSVPathForTable(s.config.TablesConfig, tableName); err != nil {
+		return "", fmt.Errorf("invalid table: %w", err)
 	}
 
 	backupWorkload := s.getBackupWorkload()
@@ -1648,10 +1691,8 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 				action := extractActionFromCommand(cmd)
 				if action == "backup" {
 					dataset := extractDatasetFromCommand(cmd)
-					if dataset == req.TableName {
-						jsonError(w, http.StatusConflict,
-							fmt.Sprintf("backup already in progress for table %s (command %s)", req.TableName, cmd.ID))
-						return
+					if dataset == tableName {
+						return "", fmt.Errorf("backup already in progress for table %s (command %s)", tableName, cmd.ID)
 					}
 				}
 			}
@@ -1667,9 +1708,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 			if cmd.Type == "runCronWorkload" {
 				action := extractActionFromCommand(cmd)
 				if action == "repair" {
-					jsonError(w, http.StatusConflict,
-						fmt.Sprintf("repair in progress (command %s), cannot start backup", cmd.ID))
-					return
+					return "", fmt.Errorf("repair in progress (command %s), cannot start backup", cmd.ID)
 				}
 			}
 		}
@@ -1678,26 +1717,23 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	// Build env vars for cron workload
 	envVars := []cpln.EnvVar{
 		{Name: "ACTION", Value: "backup"},
-		{Name: "DATASET", Value: req.TableName},
-		{Name: "TYPE", Value: req.Type},
+		{Name: "DATASET", Value: tableName},
+		{Name: "TYPE", Value: backupType},
 	}
 
 	// For main table backup, discover the active slot
-	if req.Type == "main" {
+	if backupType == "main" {
 		replicaCount, err := s.getReplicaCount()
 		if err != nil {
-			jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get replica count: %v", err))
-			return
+			return "", fmt.Errorf("failed to get replica count: %v", err)
 		}
 		clients := s.buildClients(replicaCount)
-		slot := actions2.DiscoverTableSlot(clients, req.TableName)
+		slot := actions2.DiscoverTableSlot(clients, tableName)
 		if slot == "" {
-			jsonError(w, http.StatusBadRequest,
-				fmt.Sprintf("cannot determine active main table slot for %s — ensure at least one healthy replica is available", req.TableName))
-			return
+			return "", fmt.Errorf("cannot determine active main table slot for %s — ensure at least one healthy replica is available", tableName)
 		}
 		envVars = append(envVars, cpln.EnvVar{Name: "SLOT", Value: slot})
-		slog.Info("discovered active slot for main backup", "table", req.TableName, "slot", slot)
+		slog.Info("discovered active slot for main backup", "table", tableName, "slot", slot)
 	}
 
 	// Start the backup cron workload with overrides
@@ -1708,10 +1744,49 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	slog.Info("triggering backup via cron workload", "table", req.TableName, "type", req.Type, "workload", backupWorkload)
+	slog.Info("triggering backup via cron workload", "table", tableName, "type", backupType, "workload", backupWorkload)
 	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
 	if err != nil {
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start backup: %v", err))
+		return "", fmt.Errorf("failed to start backup: %v", err)
+	}
+
+	return cmd.ID, nil
+}
+
+// handleBackup handles POST /api/backup - triggers cron workload for backup
+func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TableName string `json:"tableName"`
+		Type      string `json:"type"` // "delta" (default) or "main"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Type == "" {
+		req.Type = "delta"
+	}
+
+	cmdID, err := s.triggerBackup(req.TableName, req.Type)
+	if err != nil {
+		// Map specific errors to appropriate HTTP status codes
+		errMsg := err.Error()
+		switch {
+		case strings.Contains(errMsg, "not configured"):
+			jsonError(w, http.StatusServiceUnavailable, errMsg)
+		case strings.Contains(errMsg, "is required") || strings.Contains(errMsg, "must be") || strings.Contains(errMsg, "invalid table") || strings.Contains(errMsg, "cannot determine"):
+			jsonError(w, http.StatusBadRequest, errMsg)
+		case strings.Contains(errMsg, "already in progress") || strings.Contains(errMsg, "repair in progress"):
+			jsonError(w, http.StatusConflict, errMsg)
+		default:
+			jsonError(w, http.StatusInternalServerError, errMsg)
+		}
 		return
 	}
 
@@ -1720,7 +1795,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "accepted",
 		"message":   fmt.Sprintf("%s backup started for table %s", req.Type, req.TableName),
-		"commandId": cmd.ID,
+		"commandId": cmdID,
 	})
 }
 
@@ -1930,8 +2005,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		{Name: "RESTORE_FILE", Value: req.Filename},
 	}
 
-	// For main table restore, parse the slot from the backup filename
+	// For main table restore, use blue-green: discover active slot, target inactive
 	if req.Type == "main" {
+		// Parse backup slot from filename (the slot the backup was taken from)
 		// Filename format: {dataset}_main_{slot}-{timestamp}.tar.gz
 		prefix := req.TableName + "_main_"
 		idx := strings.Index(req.Filename, prefix)
@@ -1940,14 +2016,46 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("cannot determine slot from restore filename: %s", req.Filename))
 			return
 		}
-		slot := string(req.Filename[idx+len(prefix)])
-		if slot != "a" && slot != "b" {
+		backupSlot := string(req.Filename[idx+len(prefix)])
+		if backupSlot != "a" && backupSlot != "b" {
 			jsonError(w, http.StatusBadRequest,
-				fmt.Sprintf("invalid slot '%s' in restore filename: %s", slot, req.Filename))
+				fmt.Sprintf("invalid slot '%s' in restore filename: %s", backupSlot, req.Filename))
 			return
 		}
-		envVars = append(envVars, cpln.EnvVar{Name: "SLOT", Value: slot})
-		slog.Info("parsed slot from restore filename", "table", req.TableName, "slot", slot, "filename", req.Filename)
+
+		// Discover active slot and compute inactive target
+		replicaCount, err := s.getReplicaCount()
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get replica count: %v", err))
+			return
+		}
+		clients := s.buildClients(replicaCount)
+		activeSlot := actions2.DiscoverTableSlot(clients, req.TableName)
+
+		var targetSlot string
+		if activeSlot == "a" {
+			targetSlot = "b"
+		} else {
+			targetSlot = "a"
+		}
+
+		// Derive orchestrator API server URL for cron callback
+		// CPLN internal DNS format: {workload-name}.{location}.cpln.local
+		orchestratorAPIName := strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator-api"
+		orchestratorURL := fmt.Sprintf("http://%s.%s.cpln.local:8080", orchestratorAPIName, s.config.Location)
+
+		envVars = append(envVars,
+			cpln.EnvVar{Name: "SLOT", Value: targetSlot},
+			cpln.EnvVar{Name: "BACKUP_SLOT", Value: backupSlot},
+			cpln.EnvVar{Name: "ORCHESTRATOR_API_URL", Value: orchestratorURL},
+		)
+		slog.Info("blue-green restore plan",
+			"table", req.TableName,
+			"backupSlot", backupSlot,
+			"activeSlot", activeSlot,
+			"targetSlot", targetSlot,
+			"orchestratorURL", orchestratorURL,
+			"filename", req.Filename)
 	}
 
 	// Start the backup cron workload with restore action
@@ -1972,6 +2080,151 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		"message":   fmt.Sprintf("%s restore started for table %s from %s", req.Type, req.TableName, req.Filename),
 		"commandId": cmd.ID,
 	})
+}
+
+// handleRotateMain handles POST /api/rotate-main - rotates distributed table to a new main slot
+// This is called by the backup cron after a blue-green restore completes on the agent
+func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TableName string `json:"tableName"`
+		NewSlot   string `json:"newSlot"`
+		OldSlot   string `json:"oldSlot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.TableName == "" || req.NewSlot == "" || req.OldSlot == "" {
+		jsonError(w, http.StatusBadRequest, "tableName, newSlot, and oldSlot are required")
+		return
+	}
+	if (req.NewSlot != "a" && req.NewSlot != "b") || (req.OldSlot != "a" && req.OldSlot != "b") {
+		jsonError(w, http.StatusBadRequest, "newSlot and oldSlot must be 'a' or 'b'")
+		return
+	}
+
+	slog.Info("starting main table rotation",
+		"table", req.TableName, "newSlot", req.NewSlot, "oldSlot", req.OldSlot)
+
+	// Build clients
+	slog.Info("rotation: fetching replica count")
+	replicaCount, err := s.getReplicaCount()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get replica count: %v", err))
+		return
+	}
+	slog.Info("rotation: building clients", "replicaCount", replicaCount)
+	clients := s.buildClients(replicaCount)
+	primary := clients[0]
+
+	// Get table config for HA settings
+	slog.Info("rotation: fetching table config", "table", req.TableName)
+	tableConfig, err := primary.GetTableConfig(req.TableName, 1)
+	if err != nil {
+		slog.Warn("failed to fetch table config, using defaults", "table", req.TableName, "error", err)
+		tableConfig = &client.TableConfigResponse{
+			ClusterMain:     true,
+			HAStrategy:      "nodeads",
+			AgentRetryCount: 0,
+		}
+	}
+	slog.Info("rotation: table config ready", "clusterMain", tableConfig.ClusterMain, "haStrategy", tableConfig.HAStrategy)
+
+	newMainTable := req.TableName + "_main_" + req.NewSlot
+	oldMainTable := req.TableName + "_main_" + req.OldSlot
+	deltaTable := req.TableName + "_delta"
+	distTable := req.TableName
+
+	// Probe which replicas are reachable (some may not be scaled up).
+	// Only reachable replicas are included in the agent list and receive SQL commands.
+	// Unreachable replicas are skipped — they'll sync via cluster replication when they come online.
+	var reachableClients []*client.AgentClient
+	var reachableIndices []int
+	for i, c := range clients {
+		_, err := c.ListTables(1)
+		if err != nil {
+			slog.Warn("rotation: replica unreachable, skipping", "replica", i, "error", err)
+			continue
+		}
+		reachableClients = append(reachableClients, c)
+		reachableIndices = append(reachableIndices, i)
+	}
+	if len(reachableClients) == 0 {
+		jsonError(w, http.StatusInternalServerError, "no reachable replicas found")
+		return
+	}
+	slog.Info("rotation: reachable replicas", "reachable", reachableIndices, "total", replicaCount)
+
+	// Use first reachable client for cluster operations
+	primary = reachableClients[0]
+
+	// Build agent addresses from reachable replicas only
+	locals := []string{newMainTable, deltaTable}
+	var agents []string
+	for _, c := range reachableClients {
+		agentAddr := extractAgentAddrFromClient(c.BaseURL())
+		if agentAddr != "" {
+			agents = append(agents, agentAddr)
+		}
+	}
+
+	// ALTER distributed table on each reachable replica
+	slog.Info("swapping distributed table on reachable replicas", "table", distTable, "locals", locals, "agents", agents)
+	alterErrors := 0
+	for j, c := range reachableClients {
+		if err := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1); err != nil {
+			slog.Error("failed to alter distributed table on replica", "replica", reachableIndices[j], "error", err)
+			alterErrors++
+			continue
+		}
+		slog.Info("swapped distributed table", "replica", reachableIndices[j])
+	}
+	if alterErrors == len(reachableClients) {
+		jsonError(w, http.StatusInternalServerError, "failed to alter distributed table on all reachable replicas")
+		return
+	}
+
+	// Remove old table from cluster, then drop on reachable replicas
+	if tableConfig.ClusterMain {
+		slog.Info("removing old main table from cluster", "table", oldMainTable)
+		if err := primary.ClusterDrop(oldMainTable, 1); err != nil {
+			slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
+		}
+	}
+
+	slog.Info("dropping old main table on reachable replicas", "table", oldMainTable)
+	for j, c := range reachableClients {
+		if err := c.DropTable(oldMainTable, 1); err != nil {
+			slog.Warn("failed to drop old table", "table", oldMainTable, "replica", reachableIndices[j], "error", err)
+		}
+	}
+
+	slog.Info("main table rotation completed",
+		"table", req.TableName, "newSlot", req.NewSlot, "oldSlot", req.OldSlot,
+		"reachableReplicas", len(reachableClients), "totalReplicas", replicaCount)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":            "ok",
+		"message":           fmt.Sprintf("rotated %s to slot %s", req.TableName, req.NewSlot),
+		"reachableReplicas": len(reachableClients),
+		"totalReplicas":     replicaCount,
+	})
+}
+
+// extractAgentAddrFromClient converts an HTTP base URL to a Manticore agent address (hostname:9306)
+func extractAgentAddrFromClient(httpURL string) string {
+	u, err := url.Parse(httpURL)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:9306", u.Hostname())
 }
 
 // runCLI runs the orchestrator in CLI mode (for cron jobs)

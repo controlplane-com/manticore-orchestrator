@@ -116,19 +116,15 @@ if [ "${ACTION}" = "backup" ]; then
     exit 1
   fi
 
-  # Step 3: Create tar.gz from backup directory
-  echo "[INFO] Compressing backup into archive: ${FILENAME}"
-  tar -czf "/tmp/${FILENAME}" -C "${BACKUP_DIR}" .
-  echo "[INFO] Archive created, uploading to cloud storage..."
-
-  # Step 4: Upload to cloud storage
+  # Step 3: Compress and stream directly to cloud storage (no intermediate file)
+  echo "[INFO] Compressing and uploading backup: ${FILENAME}"
   if [ "${BACKUP_PROVIDER}" = "gcp" ]; then
-    gsutil cp "/tmp/${FILENAME}" \
-      "gs://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${FILENAME}"
+    tar -czf - -C "${BACKUP_DIR}" . \
+      | gsutil cp - "gs://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${FILENAME}"
 
   elif [ "${BACKUP_PROVIDER}" = "aws" ]; then
-    aws s3 cp "/tmp/${FILENAME}" \
-      "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${FILENAME}"
+    tar -czf - -C "${BACKUP_DIR}" . \
+      | aws s3 cp - "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${FILENAME}"
 
   else
     echo "[ERROR] Unsupported BACKUP_PROVIDER: ${BACKUP_PROVIDER}"
@@ -136,10 +132,9 @@ if [ "${ACTION}" = "backup" ]; then
     exit 1
   fi
 
-  # Step 5: Cleanup
-  echo "[INFO] Cleaning up backup directory..."
+  # Step 4: Cleanup
+  echo "[INFO] Upload complete, cleaning up backup directory..."
   rm -rf "${BACKUP_DIR}"
-  rm -f "/tmp/${FILENAME}"
 
   echo "[INFO] Backup completed: ${FILENAME}"
 
@@ -149,34 +144,47 @@ elif [ "${ACTION}" = "restore" ]; then
     exit 1
   fi
 
+  # For blue-green main restore: BACKUP_SLOT is the slot the backup was taken from
+  # TABLE_NAME is already set to the target (inactive) slot via SLOT env var
+  SOURCE_TABLE=""
+  if [ -n "${BACKUP_SLOT:-}" ]; then
+    SOURCE_TABLE="${DATASET}_main_${BACKUP_SLOT}"
+    echo "[INFO] Blue-green restore: backup from ${SOURCE_TABLE}, restoring to ${TABLE_NAME}"
+  fi
+
   TIMESTAMP="$(date -u +"%Y-%m-%dT%H-%M-%SZ")"
   RESTORE_DIR="${SHARED_VOLUME_MOUNT}/backups/${DATASET}/restore-${TIMESTAMP}"
 
   echo "[INFO] Starting physical restore of ${TABLE_NAME} from ${RESTORE_FILE}"
 
-  # Step 1: Download backup file from cloud storage
+  # Step 1: Download and extract backup directly to shared volume (no intermediate file)
+  echo "[INFO] Downloading and extracting backup to ${RESTORE_DIR}"
+  mkdir -p "${RESTORE_DIR}"
   if [ "${BACKUP_PROVIDER}" = "gcp" ]; then
-    gsutil cp "gs://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${RESTORE_FILE}" /tmp/restore.tar.gz
+    gsutil cp "gs://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${RESTORE_FILE}" - \
+      | tar -xzf - -C "${RESTORE_DIR}"
 
   elif [ "${BACKUP_PROVIDER}" = "aws" ]; then
-    aws s3 cp "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${RESTORE_FILE}" /tmp/restore.tar.gz
+    aws s3 cp "s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${RESTORE_FILE}" - \
+      | tar -xzf - -C "${RESTORE_DIR}"
 
   else
     echo "[ERROR] Unsupported BACKUP_PROVIDER: ${BACKUP_PROVIDER}"
     exit 1
   fi
 
-  # Step 2: Extract to shared volume
-  echo "[INFO] Extracting backup to ${RESTORE_DIR}"
-  mkdir -p "${RESTORE_DIR}"
-  tar -xzf /tmp/restore.tar.gz -C "${RESTORE_DIR}"
+  # Step 2: Call agent to restore (handles cluster ops + IMPORT TABLE)
+  # Include sourceTable when restoring to a different slot (blue-green)
+  RESTORE_PAYLOAD="{\"table\":\"${TABLE_NAME}\",\"backupDir\":\"${RESTORE_DIR}\"}"
+  if [ -n "${SOURCE_TABLE}" ]; then
+    RESTORE_PAYLOAD="{\"table\":\"${TABLE_NAME}\",\"backupDir\":\"${RESTORE_DIR}\",\"sourceTable\":\"${SOURCE_TABLE}\"}"
+  fi
 
-  # Step 3: Call agent to restore (handles cluster ops + manticore-backup --restore)
   echo "[INFO] Requesting agent to restore from backup..."
   RESPONSE=$(curl -sf -X POST \
     -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -H "Content-Type: application/json" \
-    -d "{\"table\":\"${TABLE_NAME}\",\"backupDir\":\"${RESTORE_DIR}\"}" \
+    -d "${RESTORE_PAYLOAD}" \
     "${AGENT_URL}/api/restore") || {
     echo "[ERROR] Failed to start restore on agent"
     rm -rf "${RESTORE_DIR}" 2>/dev/null || true
@@ -192,7 +200,7 @@ elif [ "${ACTION}" = "restore" ]; then
 
   echo "[INFO] Restore job started: ${JOB_ID}"
 
-  # Step 4: Poll agent until restore completes (initial delay to let job start)
+  # Step 3: Poll agent until restore completes (initial delay to let job start)
   sleep 15
   if ! poll_agent_job "restore" "${JOB_ID}"; then
     echo "[ERROR] Restore failed"
@@ -200,10 +208,46 @@ elif [ "${ACTION}" = "restore" ]; then
     exit 1
   fi
 
+  # Step 4: Blue-green rotation (main tables only)
+  # Call orchestrator API to rotate distributed table and clean up old slot
+  if [ -n "${SOURCE_TABLE}" ] && [ -n "${ORCHESTRATOR_API_URL:-}" ]; then
+    OLD_SLOT="${BACKUP_SLOT}"
+    NEW_SLOT="${SLOT}"
+    echo "[INFO] Calling orchestrator to rotate main table: ${DATASET} from slot ${OLD_SLOT} to ${NEW_SLOT}"
+
+    ROTATE_TMPFILE=$(mktemp)
+    ROTATE_HTTP_CODE=$(curl -s -o "${ROTATE_TMPFILE}" -w "%{http_code}" -X POST \
+      --connect-timeout 10 \
+      --max-time 120 \
+      -H "Authorization: Bearer ${AUTH_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "{\"tableName\":\"${DATASET}\",\"newSlot\":\"${NEW_SLOT}\",\"oldSlot\":\"${OLD_SLOT}\"}" \
+      "${ORCHESTRATOR_API_URL}/api/rotate-main" 2>&1) || {
+      echo "[ERROR] Failed to connect to orchestrator API at ${ORCHESTRATOR_API_URL}/api/rotate-main (curl exit code: $?)"
+      cat "${ROTATE_TMPFILE}" 2>/dev/null
+      rm -f "${ROTATE_TMPFILE}"
+      echo "[WARN] Restore data is in ${TABLE_NAME} but distributed table has NOT been rotated"
+      echo "[WARN] Manual rotation required: POST ${ORCHESTRATOR_API_URL}/api/rotate-main with {\"tableName\":\"${DATASET}\",\"newSlot\":\"${NEW_SLOT}\",\"oldSlot\":\"${OLD_SLOT}\"}"
+      rm -rf "${RESTORE_DIR}" 2>/dev/null || true
+      exit 1
+    }
+    ROTATE_RESPONSE=$(cat "${ROTATE_TMPFILE}")
+    rm -f "${ROTATE_TMPFILE}"
+
+    if [ "${ROTATE_HTTP_CODE}" -lt 200 ] || [ "${ROTATE_HTTP_CODE}" -ge 300 ]; then
+      echo "[ERROR] Orchestrator rotation failed with HTTP ${ROTATE_HTTP_CODE}: ${ROTATE_RESPONSE}"
+      echo "[WARN] Restore data is in ${TABLE_NAME} but distributed table has NOT been rotated"
+      echo "[WARN] Manual rotation required: POST ${ORCHESTRATOR_API_URL}/api/rotate-main with {\"tableName\":\"${DATASET}\",\"newSlot\":\"${NEW_SLOT}\",\"oldSlot\":\"${OLD_SLOT}\"}"
+      rm -rf "${RESTORE_DIR}" 2>/dev/null || true
+      exit 1
+    fi
+
+    echo "[INFO] Rotation response: ${ROTATE_RESPONSE}"
+  fi
+
   # Step 5: Cleanup
   echo "[INFO] Cleaning up restore directory..."
   rm -rf "${RESTORE_DIR}"
-  rm -f /tmp/restore.tar.gz
 
   echo "[INFO] Restore completed: ${RESTORE_FILE} -> ${TABLE_NAME}"
 
