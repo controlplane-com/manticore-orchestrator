@@ -2177,10 +2177,11 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 	// Use first reachable client for cluster operations
 	primary = reachableClients[0]
 
-	// Build agent addresses from reachable replicas only
+	// Build agent addresses from ALL replicas (maxScale), not just reachable ones.
+	// Manticore handles health checking on mirrors via ha_strategy.
 	locals := []string{newMainTable, deltaTable}
 	var agents []string
-	for _, c := range reachableClients {
+	for _, c := range clients {
 		agentAddr := extractAgentAddrFromClient(c.BaseURL())
 		if agentAddr != "" {
 			agents = append(agents, agentAddr)
