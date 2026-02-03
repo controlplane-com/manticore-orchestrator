@@ -65,6 +65,7 @@ type initContext struct {
 	replicaCountFetcher    ReplicaCountFetcher
 	originalCallingReplica int // The calling replica's index (stable across retries)
 
+	allClients              []*client.AgentClient // All clients based on maxScale (for mirror lists)
 	clients                 []*client.AgentClient // Filtered clients (updated each attempt)
 	availableReplicaIndices []int                 // Indices of available replicas (excluding caller)
 	tables                  []TableConfig
@@ -231,6 +232,7 @@ func Init(reqCtx context.Context, clientBuilder ClientBuilder, replicaCountFetch
 		}
 
 		// Other replicas exist - continue with normal init
+		ctx.allClients = allClients
 		ctx.clients = otherClients
 		ctx.availableReplicaIndices = availableIndices
 		ctx.callingReplica = 0 // Not used in new flow, but keep for compatibility
@@ -549,9 +551,10 @@ func stepCreateTables(ctx *initContext) error {
 			}
 		}
 
-		// Build agent list: ALL replicas (same config everywhere)
+		// Build agent list from ALL replicas (maxScale), not just reachable ones.
+		// Manticore handles health checking on mirrors via ha_strategy.
 		var agents []string
-		for _, c := range ctx.clients {
+		for _, c := range ctx.allClients {
 			agentAddr := extractAgentAddr(c.BaseURL())
 			if agentAddr != "" {
 				agents = append(agents, agentAddr)
