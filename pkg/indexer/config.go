@@ -21,7 +21,7 @@ func GenerateIndexerConfig(cfg *Config) string {
 	if cfg.HasHeader {
 		startLine = "2"
 	}
-	awkCmd := fmt.Sprintf("awk -F'%s' 'NR>=%s {print NR-%s \"\\t\" $0}' %s",
+	awkCmd := fmt.Sprintf("awk -F'%s' 'BEGIN{OFS=\"\\t\"} NR>=%s {$1=$1; print NR-%s \"\\t\" $0}' %s",
 		delimiter, startLine, startLine, cfg.SourcePath)
 
 	// Source definition
