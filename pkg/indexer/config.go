@@ -10,10 +10,25 @@ import (
 func GenerateIndexerConfig(cfg *Config) string {
 	var sb strings.Builder
 
-	// Source definition - always use tsvpipe with cat (source is preprocessed TSV)
+	// Determine delimiter based on file extension
+	delimiter := ","
+	if strings.HasSuffix(strings.ToLower(cfg.SourcePath), ".tsv") {
+		delimiter = "\\t"
+	}
+
+	// Build awk command to add line numbers as IDs
+	// NR>1 skips header if present, otherwise NR>=1
+	startLine := "1"
+	if cfg.HasHeader {
+		startLine = "2"
+	}
+	awkCmd := fmt.Sprintf("awk -F'%s' 'BEGIN{OFS=\"\\t\"} NR>=%s {$1=$1; print NR-%s \"\\t\" $0}' %s",
+		delimiter, startLine, startLine, cfg.SourcePath)
+
+	// Source definition
 	sb.WriteString(fmt.Sprintf("source %s_source {\n", cfg.PlainName))
 	sb.WriteString("    type = tsvpipe\n")
-	sb.WriteString(fmt.Sprintf("    tsvpipe_command = cat %s\n", cfg.SourcePath))
+	sb.WriteString(fmt.Sprintf("    tsvpipe_command = %s\n", awkCmd))
 	sb.WriteString("\n")
 
 	// Column definitions
