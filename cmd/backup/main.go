@@ -308,7 +308,8 @@ func pollAgentJob(agentClient *client.AgentClient, action, jobID string) error {
 // rotateMain calls the orchestrator API to rotate the distributed table after blue-green restore
 func rotateMain(cfg Config) error {
 	slog.Info("calling orchestrator to rotate main table",
-		"dataset", cfg.Dataset, "newSlot", cfg.Slot, "oldSlot", cfg.BackupSlot)
+		"dataset", cfg.Dataset, "newSlot", cfg.Slot, "oldSlot", cfg.BackupSlot,
+		"orchestratorURL", cfg.OrchestratorURL)
 
 	payload := map[string]string{
 		"tableName": cfg.Dataset,
@@ -321,6 +322,7 @@ func rotateMain(cfg Config) error {
 	}
 
 	url := cfg.OrchestratorURL + "/api/rotate-main"
+	slog.Info("rotation request", "url", url, "payload", string(body))
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -338,6 +340,11 @@ func rotateMain(cfg Config) error {
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Error("rotation request failed",
+			"statusCode", resp.StatusCode,
+			"body", string(respBody),
+			"server", resp.Header.Get("Server"),
+			"contentType", resp.Header.Get("Content-Type"))
 		return fmt.Errorf("orchestrator rotation failed with HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 

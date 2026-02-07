@@ -6,28 +6,14 @@ import (
 )
 
 // GenerateIndexerConfig creates the indexer.conf content for building a plain index
+// cfg.SourcePath should point to a preprocessed TSV file (with ID as first column)
 func GenerateIndexerConfig(cfg *Config) string {
 	var sb strings.Builder
 
-	// Determine delimiter based on file extension
-	delimiter := ","
-	if strings.HasSuffix(strings.ToLower(cfg.SourcePath), ".tsv") {
-		delimiter = "\\t"
-	}
-
-	// Build awk command to add line numbers as IDs
-	// NR>1 skips header if present, otherwise NR>=1
-	startLine := "1"
-	if cfg.HasHeader {
-		startLine = "2"
-	}
-	awkCmd := fmt.Sprintf("awk -F'%s' 'BEGIN{OFS=\"\\t\"} NR>=%s {$1=$1; print NR-%s \"\\t\" $0}' %s",
-		delimiter, startLine, startLine, cfg.SourcePath)
-
-	// Source definition
+	// Source definition - always use tsvpipe with cat (source is preprocessed TSV)
 	sb.WriteString(fmt.Sprintf("source %s_source {\n", cfg.PlainName))
 	sb.WriteString("    type = tsvpipe\n")
-	sb.WriteString(fmt.Sprintf("    tsvpipe_command = %s\n", awkCmd))
+	sb.WriteString(fmt.Sprintf("    tsvpipe_command = cat %s\n", cfg.SourcePath))
 	sb.WriteString("\n")
 
 	// Column definitions

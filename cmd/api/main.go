@@ -258,7 +258,8 @@ func runServer(config Config) {
 	mux := http.NewServeMux()
 
 	// Apply auth middleware to all endpoints
-	authMux := authMiddleware(config.AuthToken, mux)
+	loggedMux := requestLogger(mux)
+	authMux := authMiddleware(config.AuthToken, loggedMux)
 
 	// Health endpoint (legacy - simple health check)
 	mux.HandleFunc("/api/health", server.handleHealth)
@@ -406,6 +407,14 @@ func (s *Server) getTablesConfig() ([]TableConfig, error) {
 		return tables[i].Name < tables[j].Name
 	})
 	return tables, nil
+}
+
+// requestLogger logs all incoming API requests
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("incoming request", "method", r.Method, "path", r.URL.Path, "remoteAddr", r.RemoteAddr)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // authMiddleware validates bearer token
@@ -2053,9 +2062,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Derive orchestrator API server URL for cron callback
-		// CPLN internal DNS format: {workload-name}.{location}.cpln.local
+		// CPLN internal DNS: {workload}.{gvc}.cpln.local:{port}
 		orchestratorAPIName := strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator-api"
-		orchestratorURL := fmt.Sprintf("http://%s.%s.cpln.local:8080", orchestratorAPIName, s.config.Location)
+		orchestratorURL := fmt.Sprintf("http://%s.%s.cpln.local:8080", orchestratorAPIName, s.config.GVC)
 
 		envVars = append(envVars,
 			cpln.EnvVar{Name: "SLOT", Value: targetSlot},
