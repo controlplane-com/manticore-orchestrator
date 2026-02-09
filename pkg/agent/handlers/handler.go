@@ -566,7 +566,25 @@ func (h *Handler) ClusterAddHandler(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, fmt.Sprintf("table %s added to cluster %s", req.Table, h.clusterName))
 }
 
-// ClusterDrop removes a table from the cluster (must be done before DROP TABLE)
+// ClusterRemove removes a table from the cluster (idempotent, must be done before DROP TABLE)
+func (h *Handler) ClusterRemove(tableName string) error {
+	sql := fmt.Sprintf("ALTER CLUSTER %s DROP %s", h.clusterName, tableName)
+	slog.Debug("removing table from cluster", "table", tableName, "cluster", h.clusterName, "sql", sql)
+
+	if err := h.client.Execute(sql); err != nil {
+		errMsg := err.Error()
+		// Treat as idempotent if table is not in cluster or not a recognized cluster table type
+		if strings.Contains(errMsg, "is not in cluster") || strings.Contains(errMsg, "unknown or wrong type of table") {
+			slog.Debug("table not in cluster (idempotent)", "table", tableName, "cluster", h.clusterName)
+			return nil
+		}
+		return fmt.Errorf("failed to remove table from cluster: %w", err)
+	}
+
+	return nil
+}
+
+// ClusterDrop is the HTTP handler for ClusterRemove
 func (h *Handler) ClusterDrop(w http.ResponseWriter, r *http.Request) {
 	var req types.ClusterDropRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -579,17 +597,8 @@ func (h *Handler) ClusterDrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sql := fmt.Sprintf("ALTER CLUSTER %s DROP %s", h.clusterName, req.Table)
-	slog.Debug("removing table from cluster", "table", req.Table, "cluster", h.clusterName, "sql", sql)
-
-	if err := h.client.Execute(sql); err != nil {
-		// Check if table is not in cluster (idempotent)
-		if strings.Contains(err.Error(), "is not in cluster") {
-			slog.Debug("table not in cluster (idempotent)", "table", req.Table, "cluster", h.clusterName)
-			successResponse(w, fmt.Sprintf("table %s not in cluster %s", req.Table, h.clusterName))
-			return
-		}
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove table from cluster: %v", err))
+	if err := h.ClusterRemove(req.Table); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
