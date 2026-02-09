@@ -26,6 +26,7 @@ type Manager struct {
 	jobs        map[string]*jobState
 	jobsDir     string
 	stopCleanup chan struct{}
+	stopOnce    sync.Once
 }
 
 // jobState holds runtime state for a job
@@ -331,9 +332,11 @@ func (m *Manager) cleanupOldJobs() {
 	}
 }
 
-// Stop stops the cleanup goroutine
+// Stop stops the cleanup goroutine. Safe to call multiple times.
 func (m *Manager) Stop() {
-	close(m.stopCleanup)
+	m.stopOnce.Do(func() {
+		close(m.stopCleanup)
+	})
 }
 
 // JobsDir returns the jobs directory path
