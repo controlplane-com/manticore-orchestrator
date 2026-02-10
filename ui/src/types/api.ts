@@ -137,6 +137,7 @@ export interface CommandHistoryEntry {
   action: 'import' | 'repair' | 'backup' | 'restore';
   tableName?: string; // for imports, backups, and restores
   type?: 'delta' | 'main'; // for backups and restores
+  filename?: string; // restore filename for retry
   sourceReplica?: number; // only for repairs
   lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
   created: string; // ISO timestamp
@@ -145,6 +146,12 @@ export interface CommandHistoryEntry {
 // Command history response from /api/commands
 export interface CommandHistoryResponse {
   commands: CommandHistoryEntry[];
+}
+
+// Retry command request
+export interface RetryCommandRequest {
+  commandId: string;
+  workload: 'orchestrator' | 'backup';
 }
 
 // Backup request - sent when triggering backup

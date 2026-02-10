@@ -8,7 +8,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner';
 import { FormSelect } from '../components/FormSelect';
 import { ConfirmActionModal } from '../components/ConfirmActionModal';
 import { useToast } from '../hooks/useToast';
-import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster, getBackupFiles, restoreTable } from '../api/orchestrator';
+import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster, getBackupFiles, restoreTable, retryCommand } from '../api/orchestrator';
 import {
   HeartIcon,
   TableCellsIcon,
@@ -207,6 +207,20 @@ export const Dashboard = () => {
     },
     onError: (error: any) => {
       toast.error('Restore failed', error.response?.data?.error || error.message);
+    },
+  });
+
+  const retryMutation = useMutation({
+    mutationFn: (params: { commandId: string; workload: 'orchestrator' | 'backup' }) =>
+      retryCommand(params),
+    onSuccess: (data) => {
+      toast.success('Retry started', data.message);
+      queryClient.invalidateQueries({ queryKey: ['imports'] });
+      queryClient.invalidateQueries({ queryKey: ['backups'] });
+      queryClient.invalidateQueries({ queryKey: ['command-history'] });
+    },
+    onError: (error: any) => {
+      toast.error('Retry failed', error.response?.data?.error || error.message);
     },
   });
 
@@ -692,20 +706,34 @@ export const Dashboard = () => {
                     </span>
                     <span className="text-xs text-gray-400 font-mono">{cmd.id}</span>
                   </div>
-                  <Badge
-                    variant={
-                      cmd.lifecycleStage === 'completed'
-                        ? 'success'
-                        : cmd.lifecycleStage === 'failed'
-                        ? 'error'
-                        : 'info'
-                    }
-                  >
-                    {(cmd.lifecycleStage === 'running' || cmd.lifecycleStage === 'pending') && (
-                      <ArrowPathIcon className="h-3 w-3 mr-1 animate-spin" />
+                  <div className="flex items-center gap-2">
+                    {cmd.lifecycleStage === 'failed' && cmd.action !== 'repair' && (
+                      <button
+                        onClick={() => retryMutation.mutate({
+                          commandId: cmd.id,
+                          workload: cmd.action === 'import' ? 'orchestrator' : 'backup',
+                        })}
+                        disabled={retryMutation.isPending}
+                        className="px-2 py-0.5 text-xs font-medium rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition-colors disabled:opacity-50"
+                      >
+                        {retryMutation.isPending ? 'Retrying...' : 'Retry'}
+                      </button>
                     )}
-                    {cmd.lifecycleStage}
-                  </Badge>
+                    <Badge
+                      variant={
+                        cmd.lifecycleStage === 'completed'
+                          ? 'success'
+                          : cmd.lifecycleStage === 'failed'
+                          ? 'error'
+                          : 'info'
+                      }
+                    >
+                      {(cmd.lifecycleStage === 'running' || cmd.lifecycleStage === 'pending') && (
+                        <ArrowPathIcon className="h-3 w-3 mr-1 animate-spin" />
+                      )}
+                      {cmd.lifecycleStage}
+                    </Badge>
+                  </div>
                 </div>
               ))}
             </div>

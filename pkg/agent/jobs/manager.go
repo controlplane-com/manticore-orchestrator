@@ -181,6 +181,22 @@ func (m *Manager) FindJobByTableAndPath(table, csvPath string) *types.ImportJob 
 	return mostRecent
 }
 
+// GetInterruptedJobs returns jobs that were interrupted by a restart (failed with checkpoint data)
+func (m *Manager) GetInterruptedJobs() []*types.ImportJob {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var interrupted []*types.ImportJob
+	for _, state := range m.jobs {
+		if state.job.Status == types.ImportJobStatusFailed &&
+			state.job.Error == "agent restarted during import (can resume from checkpoint)" {
+			jobCopy := *state.job
+			interrupted = append(interrupted, &jobCopy)
+		}
+	}
+	return interrupted
+}
+
 // CancelJob cancels a running job by calling its cancel function
 func (m *Manager) CancelJob(id string) error {
 	m.mu.Lock()
