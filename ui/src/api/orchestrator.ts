@@ -14,6 +14,7 @@ import type {
   BackupsResponse,
   RepairsResponse,
   CommandHistoryResponse,
+  RetryCommandRequest,
   SqlQueryRequest,
   SqlQueryResponse,
   SqlBroadcastResponse,
@@ -124,6 +125,12 @@ export const getRepairs = async (): Promise<RepairsResponse> => {
 // Get command history (authenticated)
 export const getCommandHistory = async (): Promise<CommandHistoryResponse> => {
   const response = await api.get('/commands');
+  return response.data;
+};
+
+// Retry a failed command (authenticated)
+export const retryCommand = async (request: RetryCommandRequest): Promise<ApiResponse> => {
+  const response = await api.post('/commands/retry', request);
   return response.data;
 };
 
