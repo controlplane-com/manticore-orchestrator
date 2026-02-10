@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -298,6 +299,7 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/rotate-main", server.handleRotateMain)
 	mux.HandleFunc("/api/repairs", server.handleRepairs)
 	mux.HandleFunc("/api/commands", server.handleCommands)
+	mux.HandleFunc("/api/commands/retry", server.handleCommandRetry)
 	mux.HandleFunc("/api/query", server.handleQuery)
 
 	// Status endpoint (unauthenticated, for readiness probes)
@@ -1727,6 +1729,123 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleCommandRetry handles POST /api/commands/retry - retries a failed command
+func (s *Server) handleCommandRetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.cplnClient == nil {
+		jsonError(w, http.StatusServiceUnavailable, "CPLN API client not configured")
+		return
+	}
+
+	var req struct {
+		CommandID string `json:"commandId"`
+		Workload  string `json:"workload"` // "orchestrator" or "backup"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.CommandID == "" || req.Workload == "" {
+		jsonError(w, http.StatusBadRequest, "commandId and workload are required")
+		return
+	}
+
+	// Determine which CPLN workload to query
+	var workloadName string
+	switch req.Workload {
+	case "orchestrator":
+		workloadName = s.getOrchestratorWorkload()
+	case "backup":
+		workloadName = s.getBackupWorkload()
+	default:
+		jsonError(w, http.StatusBadRequest, "workload must be 'orchestrator' or 'backup'")
+		return
+	}
+
+	// Find the original command to extract its parameters
+	commands, err := s.cplnClient.QueryAllCommands(s.config.GVC, workloadName, 50)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to query commands: %v", err))
+		return
+	}
+
+	var originalCmd *cpln.Command
+	for _, cmd := range commands.Items {
+		if cmd.ID == req.CommandID {
+			originalCmd = &cmd
+			break
+		}
+	}
+	if originalCmd == nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("command %s not found", req.CommandID))
+		return
+	}
+
+	if originalCmd.LifecycleStage != "failed" {
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("can only retry failed commands (current stage: %s)", originalCmd.LifecycleStage))
+		return
+	}
+
+	// Extract action and parameters from the original command
+	action := extractActionFromCommand(*originalCmd)
+
+	switch action {
+	case "import":
+		tableName := extractTableNameFromCommand(*originalCmd)
+		if tableName == "" {
+			jsonError(w, http.StatusBadRequest, "could not extract tableName from original command")
+			return
+		}
+		// Build a synthetic request and delegate to handleImport's logic
+		importBody, _ := json.Marshal(map[string]string{"tableName": tableName})
+		syntheticReq, _ := http.NewRequest("POST", "/api/import", bytes.NewReader(importBody))
+		syntheticReq.Header.Set("Content-Type", "application/json")
+		syntheticReq.Header.Set("Authorization", r.Header.Get("Authorization"))
+		s.handleImport(w, syntheticReq)
+
+	case "backup":
+		tableName := extractDatasetFromCommand(*originalCmd)
+		backupType := extractTypeFromCommand(*originalCmd)
+		if tableName == "" || backupType == "" {
+			jsonError(w, http.StatusBadRequest, "could not extract tableName/type from original command")
+			return
+		}
+		importBody, _ := json.Marshal(map[string]string{"tableName": tableName, "type": backupType})
+		syntheticReq, _ := http.NewRequest("POST", "/api/backup", bytes.NewReader(importBody))
+		syntheticReq.Header.Set("Content-Type", "application/json")
+		syntheticReq.Header.Set("Authorization", r.Header.Get("Authorization"))
+		s.handleBackup(w, syntheticReq)
+
+	case "restore":
+		tableName := extractDatasetFromCommand(*originalCmd)
+		restoreType := extractTypeFromCommand(*originalCmd)
+		filename := extractEnvFromCommand(*originalCmd, "RESTORE_FILE")
+		if tableName == "" || filename == "" {
+			jsonError(w, http.StatusBadRequest, "could not extract tableName/filename from original command")
+			return
+		}
+		if restoreType == "" {
+			restoreType = "delta"
+		}
+		importBody, _ := json.Marshal(map[string]interface{}{
+			"tableName": tableName,
+			"filename":  filename,
+			"type":      restoreType,
+		})
+		syntheticReq, _ := http.NewRequest("POST", "/api/restore", bytes.NewReader(importBody))
+		syntheticReq.Header.Set("Content-Type", "application/json")
+		syntheticReq.Header.Set("Authorization", r.Header.Get("Authorization"))
+		s.handleRestore(w, syntheticReq)
+
+	default:
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("unsupported action for retry: %s", action))
+	}
 }
 
 // handleImport handles POST /api/import - triggers cron workload for import
