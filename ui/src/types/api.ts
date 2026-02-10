@@ -148,6 +148,12 @@ export interface CommandHistoryResponse {
   commands: CommandHistoryEntry[];
 }
 
+// Retry command request
+export interface RetryCommandRequest {
+  commandId: string;
+  workload: 'orchestrator' | 'backup';
+}
+
 // Backup request - sent when triggering backup
 export interface BackupRequest {
   tableName: string;
