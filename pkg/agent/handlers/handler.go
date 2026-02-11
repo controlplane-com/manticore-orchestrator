@@ -772,8 +772,6 @@ type TableConfigResponse struct {
 	ClusterMain     bool               `json:"clusterMain"`
 	HAStrategy      string             `json:"haStrategy"`
 	AgentRetryCount int                `json:"agentRetryCount"`
-	MemLimit        string             `json:"memLimit,omitempty"`
-	HasHeader       *bool              `json:"hasHeader,omitempty"`
 	Columns         []manticore.Column `json:"columns,omitempty"`
 }
 
@@ -802,8 +800,6 @@ func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
 		ClusterMain:     schema.ClusterMain,
 		HAStrategy:      schema.HAStrategy,
 		AgentRetryCount: schema.AgentRetryCount,
-		MemLimit:        schema.MemLimit,
-		HasHeader:       schema.HasHeader,
 		Columns:         schema.Columns,
 	})
 }

@@ -300,7 +300,6 @@ func preprocessToTSV(srcPath, dstPath string, hasHeader bool, columns []Column) 
 			}
 		}
 
-
 		fmt.Fprintf(writer, "%d\t%s\n", docID, strings.Join(fields, "\t"))
 		docID++
 	}
@@ -319,7 +318,6 @@ func detectDelimiter(path string) string {
 	}
 	return ","
 }
-
 
 // csvHasHeader checks if the first field of the first row is not a number (indicating a header)
 func csvHasHeader(csvPath string) (bool, error) {

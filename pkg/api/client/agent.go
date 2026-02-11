@@ -567,13 +567,11 @@ type TableConfigColumn struct {
 
 // TableConfigResponse represents table behavior configuration from the agent
 type TableConfigResponse struct {
-	Table           string              `json:"table"`
-	ImportMethod    string              `json:"importMethod"`
-	ClusterMain     bool                `json:"clusterMain"`
-	HAStrategy      string              `json:"haStrategy"`
-	AgentRetryCount int                 `json:"agentRetryCount"`
-	MemLimit        string              `json:"memLimit,omitempty"`
-	HasHeader       *bool               `json:"hasHeader,omitempty"`
+	Table           string             `json:"table"`
+	ImportMethod    string             `json:"importMethod"`
+	ClusterMain     bool               `json:"clusterMain"`
+	HAStrategy      string             `json:"haStrategy"`
+	AgentRetryCount int                `json:"agentRetryCount"`
 	Columns         []TableConfigColumn `json:"columns,omitempty"`
 }
 
