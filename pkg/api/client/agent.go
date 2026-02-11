@@ -476,13 +476,20 @@ func (c *AgentClient) GetTableSchema(tableName string, maxRetries int) (*schema.
 	return &resp, nil
 }
 
+// TableConfigColumn represents a column definition from the schema registry
+type TableConfigColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // TableConfigResponse represents table behavior configuration from the agent
 type TableConfigResponse struct {
-	Table           string `json:"table"`
-	ImportMethod    string `json:"importMethod"`
-	ClusterMain     bool   `json:"clusterMain"`
-	HAStrategy      string `json:"haStrategy"`
-	AgentRetryCount int    `json:"agentRetryCount"`
+	Table           string             `json:"table"`
+	ImportMethod    string             `json:"importMethod"`
+	ClusterMain     bool               `json:"clusterMain"`
+	HAStrategy      string             `json:"haStrategy"`
+	AgentRetryCount int                `json:"agentRetryCount"`
+	Columns         []TableConfigColumn `json:"columns,omitempty"`
 }
 
 // GetTableConfig returns the behavior configuration for a table

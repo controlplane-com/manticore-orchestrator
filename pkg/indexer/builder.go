@@ -90,7 +90,7 @@ func (b *IndexBuilder) Build(ctx context.Context, cfg *Config) (*BuildResult, er
 	// Step 2: Preprocess source file into TSV with IDs for the indexer
 	// This avoids relying on awk/sed being available in the container
 	tsvPath := filepath.Join(workDir, "source.tsv")
-	if err := preprocessToTSV(cfg.SourcePath, tsvPath, cfg.HasHeader); err != nil {
+	if err := preprocessToTSV(cfg.SourcePath, tsvPath, cfg.HasHeader, cfg.Columns); err != nil {
 		return nil, fmt.Errorf("failed to preprocess source file: %w", err)
 	}
 	cfg.SourcePath = tsvPath
@@ -248,8 +248,8 @@ func previewFile(path string, n int) (string, error) {
 }
 
 // preprocessToTSV reads a CSV or TSV source file and writes a TSV with auto-generated
-// document IDs as the first column. This avoids relying on awk in the container.
-func preprocessToTSV(srcPath, dstPath string, hasHeader bool) error {
+// document IDs as the first column. Applies type-aware conversions for timestamps and bools.
+func preprocessToTSV(srcPath, dstPath string, hasHeader bool, columns []Column) error {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("failed to open source: %w", err)
@@ -266,10 +266,7 @@ func preprocessToTSV(srcPath, dstPath string, hasHeader bool) error {
 	defer writer.Flush()
 
 	// Detect delimiter from file extension
-	delimiter := ","
-	if strings.HasSuffix(strings.ToLower(srcPath), ".tsv") {
-		delimiter = "\t"
-	}
+	delimiter := detectDelimiter(srcPath)
 
 	scanner := bufio.NewScanner(src)
 	// Increase buffer size for lines that may be very long
@@ -289,8 +286,20 @@ func preprocessToTSV(srcPath, dstPath string, hasHeader bool) error {
 			continue
 		}
 
-		// Split on source delimiter, rejoin with tabs
+		// Split on source delimiter
 		fields := strings.Split(line, delimiter)
+
+		// Apply type-aware conversions based on column definitions
+		for i, col := range columns {
+			if i >= len(fields) {
+				break
+			}
+			switch col.Type {
+			case "attr_bool":
+				fields[i] = convertBool(fields[i])
+			}
+		}
+
 		fmt.Fprintf(writer, "%d\t%s\n", docID, strings.Join(fields, "\t"))
 		docID++
 	}
@@ -300,6 +309,14 @@ func preprocessToTSV(srcPath, dstPath string, hasHeader bool) error {
 	}
 
 	return nil
+}
+
+// detectDelimiter returns the delimiter based on file extension
+func detectDelimiter(path string) string {
+	if strings.HasSuffix(strings.ToLower(path), ".tsv") {
+		return "\t"
+	}
+	return ","
 }
 
 // csvHasHeader checks if the first field of the first row is not a number (indicating a header)
@@ -320,8 +337,11 @@ func csvHasHeader(csvPath string) (bool, error) {
 		return false, nil
 	}
 
-	// Get the first field (before first comma)
-	firstField := strings.Split(firstLine, ",")[0]
+	// Detect delimiter from file extension
+	delimiter := detectDelimiter(csvPath)
+
+	// Get the first field
+	firstField := strings.Split(firstLine, delimiter)[0]
 	firstField = strings.TrimSpace(firstField)
 
 	// Check if first field is a valid number (integer)
@@ -332,4 +352,15 @@ func csvHasHeader(csvPath string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// convertBool converts boolean-like values to 0/1 for Manticore's uint representation
+func convertBool(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "t", "true", "1", "yes":
+		return "1"
+	default:
+		return "0"
+	}
 }

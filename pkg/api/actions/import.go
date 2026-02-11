@@ -333,25 +333,12 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 		"workDir", workDir,
 		"useSharedVolume", useSharedVolume)
 
-	// Get table schema from agent to determine columns
-	schemaResp, err := primary.GetTableSchema(ctx.Dataset, 1)
-	if err != nil {
-		cleanup()
-		return fmt.Errorf("failed to get table schema: %w", err)
-	}
-
-	// Convert schema columns to indexer columns
-	// Skip the 'id' column as it's auto-generated
+	// Use columns from schema registry (YAML config) — preserves user-declared order
 	var columns []indexer.Column
-	for _, col := range schemaResp.Columns {
-		if col.Field == "id" {
-			continue
-		}
-		// Map Manticore types to indexer types
-		indexerType := mapManticoreTypeToIndexer(col.Type)
+	for _, col := range tableConfig.Columns {
 		columns = append(columns, indexer.Column{
-			Name: col.Field,
-			Type: indexerType,
+			Name: col.Name,
+			Type: col.Type, // Already in indexer-compatible format (attr_timestamp, field, etc.)
 		})
 	}
 
@@ -460,32 +447,3 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 	return nil
 }
 
-// mapManticoreTypeToIndexer maps Manticore column types to indexer types
-func mapManticoreTypeToIndexer(manticoreType string) string {
-	// Manticore DESCRIBE returns types like: text, string, uint, bigint, float, bool, timestamp, multi, multi64, json
-	// Indexer uses: field, field_string, attr_string, attr_uint, attr_bigint, attr_float, attr_bool, attr_timestamp, attr_multi, attr_multi_64, attr_json
-	switch manticoreType {
-	case "text":
-		return "field"
-	case "string":
-		return "attr_string"
-	case "uint":
-		return "attr_uint"
-	case "bigint":
-		return "attr_bigint"
-	case "float":
-		return "attr_float"
-	case "bool":
-		return "attr_bool"
-	case "timestamp":
-		return "attr_timestamp"
-	case "multi":
-		return "attr_multi"
-	case "multi64":
-		return "attr_multi_64"
-	case "json":
-		return "attr_json"
-	default:
-		return "field" // default to field
-	}
-}

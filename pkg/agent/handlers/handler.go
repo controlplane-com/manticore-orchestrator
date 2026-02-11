@@ -729,7 +729,7 @@ func (h *Handler) ClusterRejoin(req types.ClusterRejoinRequest) error {
 	return nil
 }
 
-// GetTableSchema returns the schema of a table using DESCRIBE
+// GetTableSchema returns the schema of a table from the YAML schema registry
 func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 	// Extract table name from URL path: /api/tables/{name}/schema
 	path := r.URL.Path
@@ -742,13 +742,21 @@ func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Query the delta table which has the actual column schema
-	// (both main and delta tables have the same columns, but distributed tables don't expose columns)
-	deltaTable := tableName + "_delta"
-	columns, err := h.client.DescribeTable(deltaTable)
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to describe table: %v", err))
+	s, ok := h.registry.Get(tableName)
+	if !ok {
+		errorResponse(w, http.StatusNotFound, fmt.Sprintf("no schema found for table %s", tableName))
 		return
+	}
+
+	// Map registry columns to ColumnSchema format
+	var columns []schema.ColumnSchema
+	for _, col := range s.Columns {
+		ct := manticore.GetColumnType(col.Type)
+		rtType := manticore.GetRTTypeName(ct)
+		columns = append(columns, schema.ColumnSchema{
+			Field: col.Name,
+			Type:  rtType,
+		})
 	}
 
 	jsonResponse(w, http.StatusOK, schema.TableSchemaResponse{
@@ -759,11 +767,12 @@ func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 
 // TableConfigResponse represents table behavior configuration
 type TableConfigResponse struct {
-	Table           string `json:"table"`
-	ImportMethod    string `json:"importMethod"`
-	ClusterMain     bool   `json:"clusterMain"`
-	HAStrategy      string `json:"haStrategy"`
-	AgentRetryCount int    `json:"agentRetryCount"`
+	Table           string             `json:"table"`
+	ImportMethod    string             `json:"importMethod"`
+	ClusterMain     bool               `json:"clusterMain"`
+	HAStrategy      string             `json:"haStrategy"`
+	AgentRetryCount int                `json:"agentRetryCount"`
+	Columns         []manticore.Column `json:"columns,omitempty"`
 }
 
 // GetTableConfig returns behavior configuration for a table
@@ -791,6 +800,7 @@ func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
 		ClusterMain:     schema.ClusterMain,
 		HAStrategy:      schema.HAStrategy,
 		AgentRetryCount: schema.AgentRetryCount,
+		Columns:         schema.Columns,
 	})
 }
 
