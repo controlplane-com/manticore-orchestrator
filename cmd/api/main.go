@@ -394,6 +394,69 @@ func (s *Server) buildClients(replicaCount int) []*client.AgentClient {
 	return clients
 }
 
+// scaleUpForOperation scales the manticore workload to maxScale before a data operation.
+// Returns the original minScale (for later restore) and maxScale, or skips if already at full scale.
+func (s *Server) scaleUpForOperation() (originalMinScale int, maxScale int, err error) {
+	if s.cplnClient == nil {
+		return 0, 0, fmt.Errorf("CPLN client not configured")
+	}
+
+	minScale, maxScale, err := s.cplnClient.GetWorkloadScaling(s.config.GVC, s.config.WorkloadName)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get workload scaling: %w", err)
+	}
+
+	if minScale >= maxScale {
+		slog.Info("workload already at full scale, skipping scale-up", "minScale", minScale, "maxScale", maxScale)
+		return 0, maxScale, nil // 0 signals no scale-down needed
+	}
+
+	slog.Info("scaling up workload for operation", "workload", s.config.WorkloadName, "minScale", minScale, "maxScale", maxScale)
+	if err := s.cplnClient.PatchWorkloadMinScale(s.config.GVC, s.config.WorkloadName, maxScale); err != nil {
+		return 0, 0, fmt.Errorf("failed to patch minScale: %w", err)
+	}
+
+	// Wait for all replicas to be ready (5 min timeout)
+	if err := s.cplnClient.WaitForReplicasReady(s.config.GVC, s.config.WorkloadName, maxScale, 5*time.Minute); err != nil {
+		slog.Warn("timed out waiting for replicas, proceeding anyway", "error", err, "maxScale", maxScale)
+	} else {
+		slog.Info("all replicas ready", "count", maxScale)
+	}
+
+	return minScale, maxScale, nil
+}
+
+// scaleDownAfterOperation polls a CPLN command until it completes, then restores minScale.
+// Designed to run as a goroutine.
+func (s *Server) scaleDownAfterOperation(originalMinScale int, commandID, commandWorkload string) {
+	const pollInterval = 15 * time.Second
+
+	slog.Info("watching command for scale-down", "commandId", commandID, "workload", commandWorkload, "originalMinScale", originalMinScale)
+
+	for {
+		time.Sleep(pollInterval)
+
+		cmd, err := s.cplnClient.GetCommand(s.config.GVC, commandWorkload, commandID)
+		if err != nil {
+			slog.Warn("failed to poll command for scale-down", "commandId", commandID, "error", err)
+			continue
+		}
+
+		switch cmd.LifecycleStage {
+		case "completed", "failed":
+			slog.Info("command finished, restoring minScale", "commandId", commandID, "lifecycleStage", cmd.LifecycleStage, "originalMinScale", originalMinScale)
+			if err := s.cplnClient.PatchWorkloadMinScale(s.config.GVC, s.config.WorkloadName, originalMinScale); err != nil {
+				slog.Error("failed to restore minScale after operation", "error", err, "originalMinScale", originalMinScale)
+			} else {
+				slog.Info("minScale restored", "minScale", originalMinScale)
+			}
+			return
+		default:
+			slog.Debug("command still running, waiting for scale-down", "commandId", commandID, "lifecycleStage", cmd.LifecycleStage)
+		}
+	}
+}
+
 // getTablesConfig parses the TABLES_CONFIG JSON
 func (s *Server) getTablesConfig() ([]TableConfig, error) {
 	var configMap map[string]string
@@ -1776,6 +1839,12 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Scale up to maxScale before starting the import
+	originalMinScale, _, scaleErr := s.scaleUpForOperation()
+	if scaleErr != nil {
+		slog.Warn("failed to scale up for import, proceeding anyway", "error", scaleErr)
+	}
+
 	// Start the cron workload with table-specific overrides
 	overrides := []cpln.ContainerOverride{
 		{
@@ -1794,6 +1863,11 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start import: %v", err))
 		return
+	}
+
+	// Launch background goroutine to scale down after the command completes
+	if scaleErr == nil && originalMinScale > 0 {
+		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, orchestratorWorkload)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1882,6 +1956,12 @@ func (s *Server) triggerBackup(tableName, backupType string) (string, error) {
 		slog.Info("discovered active slot for main backup", "table", tableName, "slot", slot)
 	}
 
+	// Scale up to maxScale before starting the backup
+	originalMinScale, _, scaleErr := s.scaleUpForOperation()
+	if scaleErr != nil {
+		slog.Warn("failed to scale up for backup, proceeding anyway", "error", scaleErr)
+	}
+
 	// Start the backup cron workload with overrides
 	overrides := []cpln.ContainerOverride{
 		{
@@ -1894,6 +1974,11 @@ func (s *Server) triggerBackup(tableName, backupType string) (string, error) {
 	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
 	if err != nil {
 		return "", fmt.Errorf("failed to start backup: %v", err)
+	}
+
+	// Launch background goroutine to scale down after the command completes
+	if scaleErr == nil && originalMinScale > 0 {
+		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, backupWorkload)
 	}
 
 	return cmd.ID, nil
@@ -2204,6 +2289,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			"filename", req.Filename)
 	}
 
+	// Scale up to maxScale before starting the restore
+	originalMinScale, _, scaleErr := s.scaleUpForOperation()
+	if scaleErr != nil {
+		slog.Warn("failed to scale up for restore, proceeding anyway", "error", scaleErr)
+	}
+
 	// Start the backup cron workload with restore action
 	overrides := []cpln.ContainerOverride{
 		{
@@ -2217,6 +2308,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start restore: %v", err))
 		return
+	}
+
+	// Launch background goroutine to scale down after the command completes
+	if scaleErr == nil && originalMinScale > 0 {
+		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, backupWorkload)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -574,7 +574,7 @@ func (h *Handler) ClusterRemove(tableName string) error {
 	if err := h.client.Execute(sql); err != nil {
 		errMsg := err.Error()
 		// Treat as idempotent if table is not in cluster or not a recognized cluster table type
-		if strings.Contains(errMsg, "is not in cluster") || strings.Contains(errMsg, "unknown or wrong type of table") {
+		if strings.Contains(errMsg, "is not in cluster") || strings.Contains(errMsg, "unknown or wrong type of table") || strings.Contains(errMsg, "doesn't belong to cluster") {
 			slog.Debug("table not in cluster (idempotent)", "table", tableName, "cluster", h.clusterName)
 			return nil
 		}
