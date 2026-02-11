@@ -346,8 +346,11 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 	// The shared volume is only used for indexer output, not for source data
 	sourcePath := filepath.Join(ctx.S3Mount, ctx.CSVPath)
 
-	// Set memory limit
-	memLimit := ctx.ImportMemLimit
+	// Set memory limit: table config > context > default
+	memLimit := tableConfig.MemLimit
+	if memLimit == "" {
+		memLimit = ctx.ImportMemLimit
+	}
 	if memLimit == "" {
 		memLimit = indexer.DefaultMemLimit
 	}
@@ -359,6 +362,11 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 		SourcePath: sourcePath,
 		Columns:    columns,
 		MemLimit:   memLimit,
+	}
+
+	// Use explicit hasHeader from config if set, otherwise auto-detect
+	if tableConfig.HasHeader != nil {
+		cfg.HasHeader = *tableConfig.HasHeader
 	}
 
 	result, err := ctx.IndexerBuilder.Build(goCtx, cfg)

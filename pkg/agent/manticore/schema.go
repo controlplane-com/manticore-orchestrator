@@ -43,6 +43,8 @@ type Schema struct {
 	ClusterMain     bool   // Whether to add main table to cluster, defaults to true
 	HAStrategy      string // HA strategy for distributed table mirrors, defaults to "nodeads"
 	AgentRetryCount int    // Retry count for failed agents, defaults to 0
+	MemLimit        string // Indexer memory limit, defaults to "2G"
+	HasHeader       *bool  // Whether source file has a header row, nil = auto-detect
 }
 
 // csv-to-manticore type to ColumnType mapping
@@ -151,6 +153,8 @@ type TableBehaviorConfig struct {
 	ClusterMain     *bool  `yaml:"clusterMain" json:"clusterMain"`         // Use pointer for nil-check (default true)
 	HAStrategy      string `yaml:"haStrategy" json:"haStrategy"`           // "random", "roundrobin", "nodeads" (default), "noerrors"
 	AgentRetryCount *int   `yaml:"agentRetryCount" json:"agentRetryCount"` // Pointer for nil-check (default 0)
+	MemLimit        string `yaml:"memLimit" json:"memLimit"`               // Indexer memory limit (default "2G")
+	HasHeader       *bool  `yaml:"hasHeader" json:"hasHeader"`             // Whether source file has a header row (default: auto-detect)
 }
 
 // SchemaConfig represents the YAML structure for a single table schema (JSON format)
@@ -215,6 +219,8 @@ func (r *SchemaRegistry) LoadFromFile(path string) error {
 			ClusterMain:     clusterMain,
 			HAStrategy:      haStrategy,
 			AgentRetryCount: agentRetryCount,
+			MemLimit:        config.Config.MemLimit,
+			HasHeader:       config.Config.HasHeader,
 		}
 	}
 
