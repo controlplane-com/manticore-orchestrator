@@ -21,7 +21,7 @@ import (
 	actions2 "github.com/controlplane-com/manticore-orchestrator/pkg/api/actions"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
-	"github.com/controlplane-com/manticore-orchestrator/pkg/s3"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/s3"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cluster"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cpln"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
