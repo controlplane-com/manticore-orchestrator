@@ -507,6 +507,7 @@ func (s *Server) hasActiveOp(tableName string) bool {
 	return exists
 }
 
+
 // getTablesConfig parses the TABLES_CONFIG JSON
 func (s *Server) getTablesConfig() ([]TableConfig, error) {
 	var configMap map[string]string
@@ -1918,8 +1919,36 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Track the operation for UI visibility and return immediately
-	s.setActiveOp(req.TableName, "import", "scaling")
+	// Scale up to maxScale before starting the import
+	originalMinScale, _, scaleErr := s.scaleUpForOperation()
+	if scaleErr != nil {
+		slog.Warn("failed to scale up for import, proceeding anyway", "error", scaleErr)
+	}
+
+	// Start the cron workload with table-specific overrides
+	overrides := []cpln.ContainerOverride{
+		{
+			Name: "orchestrator",
+			Env: []cpln.EnvVar{
+				{Name: "ACTION", Value: "import"},
+				{Name: "TABLE_NAME", Value: req.TableName},
+				{Name: "IMPORT_POLL_INTERVAL", Value: os.Getenv("IMPORT_POLL_INTERVAL")},
+				{Name: "IMPORT_POLL_TIMEOUT", Value: os.Getenv("IMPORT_POLL_TIMEOUT")},
+			},
+		},
+	}
+
+	slog.Info("triggering import via cron workload", "table", req.TableName, "workload", orchestratorWorkload)
+	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, orchestratorWorkload, s.config.Location, overrides)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start import: %v", err))
+		return
+	}
+
+	// Launch background goroutine to scale down after the command completes
+	if scaleErr == nil && originalMinScale > 0 {
+		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, orchestratorWorkload)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -2421,8 +2450,31 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			"filename", req.Filename)
 	}
 
-	// Track the operation for UI visibility and return immediately
-	s.setActiveOp(req.TableName, "restore", "scaling")
+	// Scale up to maxScale before starting the restore
+	originalMinScale, _, scaleErr := s.scaleUpForOperation()
+	if scaleErr != nil {
+		slog.Warn("failed to scale up for restore, proceeding anyway", "error", scaleErr)
+	}
+
+	// Start the backup cron workload with restore action
+	overrides := []cpln.ContainerOverride{
+		{
+			Name: s.config.BackupContainer,
+			Env:  envVars,
+		},
+	}
+
+	slog.Info("triggering restore via cron workload", "table", req.TableName, "type", req.Type, "filename", req.Filename, "workload", backupWorkload)
+	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start restore: %v", err))
+		return
+	}
+
+	// Launch background goroutine to scale down after the command completes
+	if scaleErr == nil && originalMinScale > 0 {
+		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, backupWorkload)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
