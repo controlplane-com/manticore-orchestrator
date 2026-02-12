@@ -2206,6 +2206,27 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Include operations still in scaling phase (not yet visible as CPLN commands)
+	for _, op := range s.getActiveOps() {
+		if op.Action != "restore" {
+			continue
+		}
+		// Avoid duplicates if CPLN command already exists for this table
+		alreadyTracked := false
+		for _, b := range backups {
+			if b.TableName == op.TableName {
+				alreadyTracked = true
+				break
+			}
+		}
+		if !alreadyTracked {
+			backups = append(backups, BackupStatus{
+				TableName:      op.TableName,
+				LifecycleStage: op.Phase,
+			})
+		}
+	}
+
 	response := BackupsResponse{
 		Backups: backups,
 	}
