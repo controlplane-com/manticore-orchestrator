@@ -2206,16 +2206,17 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Include operations still in scaling phase (not yet visible as CPLN commands)
+	// Include operations still in scaling/starting phase (not yet visible as CPLN commands)
 	for _, op := range s.getActiveOps() {
 		if op.Action != "restore" {
 			continue
 		}
-		// Avoid duplicates if CPLN command already exists for this table
+		// If CPLN command already exists for this table, clear the local tracking
 		alreadyTracked := false
 		for _, b := range backups {
 			if b.TableName == op.TableName {
 				alreadyTracked = true
+				s.clearActiveOp(op.TableName) // CPLN has taken over
 				break
 			}
 		}
