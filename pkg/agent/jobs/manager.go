@@ -26,6 +26,7 @@ type Manager struct {
 	jobs        map[string]*jobState
 	jobsDir     string
 	stopCleanup chan struct{}
+	stopOnce    sync.Once
 }
 
 // jobState holds runtime state for a job
@@ -180,6 +181,22 @@ func (m *Manager) FindJobByTableAndPath(table, csvPath string) *types.ImportJob 
 	return mostRecent
 }
 
+// GetInterruptedJobs returns jobs that were interrupted by a restart (failed with checkpoint data)
+func (m *Manager) GetInterruptedJobs() []*types.ImportJob {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var interrupted []*types.ImportJob
+	for _, state := range m.jobs {
+		if state.job.Status == types.ImportJobStatusFailed &&
+			state.job.Error == "agent restarted during import (can resume from checkpoint)" {
+			jobCopy := *state.job
+			interrupted = append(interrupted, &jobCopy)
+		}
+	}
+	return interrupted
+}
+
 // CancelJob cancels a running job by calling its cancel function
 func (m *Manager) CancelJob(id string) error {
 	m.mu.Lock()
@@ -331,9 +348,11 @@ func (m *Manager) cleanupOldJobs() {
 	}
 }
 
-// Stop stops the cleanup goroutine
+// Stop stops the cleanup goroutine. Safe to call multiple times.
 func (m *Manager) Stop() {
-	close(m.stopCleanup)
+	m.stopOnce.Do(func() {
+		close(m.stopCleanup)
+	})
 }
 
 // JobsDir returns the jobs directory path

@@ -5,7 +5,7 @@ import (
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
-	"github.com/controlplane-com/manticore-orchestrator/pkg/s3"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/s3"
 )
 
 // Context holds the execution context for actions

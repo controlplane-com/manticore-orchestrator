@@ -25,7 +25,7 @@ type BuildResult struct {
 	RowCount  int64  // Number of rows in the index
 }
 
-// tsvpipeDirectives maps schema column types to indexer tsvpipe directives
+// TsvpipeDirectives maps schema column types to indexer tsvpipe directives
 var TsvpipeDirectives = map[string]string{
 	"field":          "tsvpipe_field",
 	"field_string":   "tsvpipe_field_string",

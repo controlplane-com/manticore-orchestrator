@@ -400,9 +400,16 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 
 		slog.Debug("ensuring tables", "table", tableName, "mainTable", mainTable, "deltaTable", deltaTable, "clusterMain", clusterMain)
 
-		// Drop the other slot's main table if it exists (cleanup from previous slot switch)
+		// Remove the other slot's main table from cluster, then drop it (cleanup from previous slot switch)
+		if err := handler.ClusterRemove(otherMainTable); err != nil {
+			slog.Warn("failed to remove other slot from cluster (may not exist)", "table", otherMainTable, "error", err)
+		}
 		if err := handler.DropTable(otherMainTable); err != nil {
-			return fmt.Errorf("failed to drop other slot table: %w", err)
+			if strings.Contains(err.Error(), "unable to drop a cluster table") {
+				slog.Warn("cannot drop other slot table (still has cluster metadata, will retry on next restart)", "table", otherMainTable, "error", err)
+			} else {
+				return fmt.Errorf("failed to drop other slot table: %w", err)
+			}
 		}
 
 		// Create delta table

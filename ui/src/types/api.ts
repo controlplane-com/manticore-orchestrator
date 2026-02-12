@@ -122,8 +122,8 @@ export interface TableSchemaResponse {
 // Import status from /api/imports
 export interface ImportStatus {
   tableName: string;
-  commandId: string;
-  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+  commandId?: string;
+  lifecycleStage: 'scaling' | 'starting' | 'pending' | 'running' | 'completed' | 'failed';
 }
 
 // Imports response from /api/imports
@@ -137,6 +137,7 @@ export interface CommandHistoryEntry {
   action: 'import' | 'repair' | 'backup' | 'restore';
   tableName?: string; // for imports, backups, and restores
   type?: 'delta' | 'main'; // for backups and restores
+  filename?: string; // restore filename for retry
   sourceReplica?: number; // only for repairs
   lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
   created: string; // ISO timestamp
@@ -156,8 +157,9 @@ export interface BackupRequest {
 // Backup status from /api/backups
 export interface BackupStatus {
   tableName: string;
-  commandId: string;
-  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+  commandId?: string;
+  lifecycleStage: 'scaling' | 'starting' | 'pending' | 'running' | 'completed' | 'failed';
+  action: 'backup' | 'restore';
 }
 
 // Backups response from /api/backups
