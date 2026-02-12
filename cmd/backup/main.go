@@ -145,7 +145,7 @@ func runBackup(cfg Config) error {
 
 	// Step 2: Poll until backup completes (initial delay to let job start)
 	time.Sleep(15 * time.Second)
-	if err := pollAgentJob(agentClient, "backup", jobID); err != nil {
+	if err := pollAgentJob(agentClient, "backup", jobID, nil); err != nil {
 		return fmt.Errorf("backup job failed: %w", err)
 	}
 
@@ -241,7 +241,7 @@ func runRestore(cfg Config) error {
 
 	// Step 3: Poll until restore completes (initial delay to let job start)
 	time.Sleep(15 * time.Second)
-	if err := pollAgentJob(agentClient, "restore", jobID); err != nil {
+	if err := pollAgentJob(agentClient, "restore", jobID, &restoreReq); err != nil {
 		return fmt.Errorf("restore job failed: %w", err)
 	}
 
@@ -266,9 +266,13 @@ func runRestore(cfg Config) error {
 	return nil
 }
 
-// pollAgentJob polls an agent backup/restore job until completion
-func pollAgentJob(agentClient *client.AgentClient, action, jobID string) error {
+// pollAgentJob polls an agent backup/restore job until completion.
+// If restoreReq is non-nil and the agent restarts, the restore will be re-submitted.
+func pollAgentJob(agentClient *client.AgentClient, action, jobID string, restoreReq *types.RestoreRequest) error {
 	const pollInterval = 5 * time.Second
+
+	consecutiveFailures := 0
+	restartRecoveries := 0
 
 	for {
 		var job *types.BackupJob
@@ -284,10 +288,47 @@ func pollAgentJob(agentClient *client.AgentClient, action, jobID string) error {
 		}
 
 		if err != nil {
-			slog.Warn("failed to poll job status, retrying", "jobId", jobID, "error", err)
+			consecutiveFailures++
+			slog.Warn("failed to poll job status",
+				"jobId", jobID, "error", err,
+				"consecutiveFailures", consecutiveFailures)
+
+			if consecutiveFailures >= client.RestartMaxConsecutiveFailures {
+				if restartRecoveries >= client.MaxRestartRecoveries {
+					return fmt.Errorf("agent unreachable after %d restart recovery attempt(s): %w", restartRecoveries, err)
+				}
+
+				slog.Warn("agent appears to have restarted, waiting for recovery",
+					"action", action, "jobId", jobID)
+
+				if err := agentClient.WaitForHealth(context.Background(), client.RestartRecoveryTimeout); err != nil {
+					return fmt.Errorf("agent did not recover: %w", err)
+				}
+
+				// Re-submit restore if possible
+				if action == "restore" && restoreReq != nil {
+					slog.Info("re-submitting restore after agent restart")
+					newJobID, err := agentClient.StartRestore(*restoreReq, 0)
+					if err != nil {
+						return fmt.Errorf("failed to re-start restore after restart: %w", err)
+					}
+					jobID = newJobID
+					slog.Info("restore re-submitted after restart", "newJobId", jobID)
+				} else {
+					// For backup, we can't easily re-submit — just return error
+					return fmt.Errorf("agent restarted during %s, job lost", action)
+				}
+
+				consecutiveFailures = 0
+				restartRecoveries++
+			}
+
 			time.Sleep(pollInterval)
 			continue
 		}
+
+		// Successful poll — reset failure counter
+		consecutiveFailures = 0
 
 		switch job.Status {
 		case types.BackupJobStatusCompleted:

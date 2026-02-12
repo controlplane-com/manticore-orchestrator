@@ -159,6 +159,11 @@ export const Dashboard = () => {
 
   const selectedTableBackup = selectedBackupTable ? getBackupForTable(selectedBackupTable) : undefined;
 
+  // Check if a restore (scaling) is in progress for the selected restore table
+  const selectedRestoreOp = selectedRestoreTable
+    ? backupsData?.backups?.find(b => b.tableName === selectedRestoreTable && b.lifecycleStage === 'scaling')
+    : undefined;
+
   // Mutations
   const importMutation = useMutation({
     mutationFn: () => importTable({ tableName: selectedTable }),
@@ -203,6 +208,7 @@ export const Dashboard = () => {
     mutationFn: () => restoreTable({ tableName: selectedRestoreTable, filename: selectedBackupFile, type: restoreType }),
     onSuccess: (data) => {
       toast.success('Restore started', data.message);
+      queryClient.invalidateQueries({ queryKey: ['backups'] });
       queryClient.invalidateQueries({ queryKey: ['command-history'] });
     },
     onError: (error: any) => {
@@ -410,7 +416,9 @@ export const Dashboard = () => {
                 <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
                   <ArrowPathIcon className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-spin" />
                   <span className="text-sm text-blue-700 dark:text-blue-300">
-                    Import {selectedTableImport.lifecycleStage} for "{selectedTable}"
+                    {selectedTableImport.lifecycleStage === 'scaling'
+                      ? `Scaling replicas for "${selectedTable}"...`
+                      : `Import ${selectedTableImport.lifecycleStage} for "${selectedTable}"`}
                   </span>
                   <Badge variant="info">{selectedTableImport.lifecycleStage}</Badge>
                 </div>
@@ -623,13 +631,24 @@ export const Dashboard = () => {
                 ) : null}
               </div>
 
+              {/* Restore scaling status indicator */}
+              {selectedRestoreOp && (
+                <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
+                  <ArrowPathIcon className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-spin" />
+                  <span className="text-sm text-blue-700 dark:text-blue-300">
+                    Scaling replicas for "{selectedRestoreTable}" restore...
+                  </span>
+                  <Badge variant="info">scaling</Badge>
+                </div>
+              )}
+
               <Button
                 variant="secondary"
                 onClick={() => openConfirmModal('restore')}
-                disabled={isAnyMutationLoading || !selectedRestoreTable || !selectedBackupFile}
+                disabled={isAnyMutationLoading || !selectedRestoreTable || !selectedBackupFile || !!selectedRestoreOp}
               >
                 <CloudArrowDownIcon className="h-4 w-4 mr-2" />
-                {restoreMutation.isPending ? 'Starting...' : 'Restore Table'}
+                {restoreMutation.isPending ? 'Starting...' : selectedRestoreOp ? 'Restore in Progress' : 'Restore Table'}
               </Button>
             </div>
           </Card>

@@ -122,8 +122,8 @@ export interface TableSchemaResponse {
 // Import status from /api/imports
 export interface ImportStatus {
   tableName: string;
-  commandId: string;
-  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+  commandId?: string;
+  lifecycleStage: 'scaling' | 'pending' | 'running' | 'completed' | 'failed';
 }
 
 // Imports response from /api/imports
@@ -163,8 +163,8 @@ export interface BackupRequest {
 // Backup status from /api/backups
 export interface BackupStatus {
   tableName: string;
-  commandId: string;
-  lifecycleStage: 'pending' | 'running' | 'completed' | 'failed';
+  commandId?: string;
+  lifecycleStage: 'scaling' | 'pending' | 'running' | 'completed' | 'failed';
 }
 
 // Backups response from /api/backups

@@ -16,6 +16,14 @@ import (
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
+// Restart recovery constants
+const (
+	RestartMaxConsecutiveFailures = 3                // consecutive poll failures before assuming restart
+	RestartRecoveryTimeout        = 5 * time.Minute  // max wait for agent to come back
+	RestartHealthPollInterval     = 10 * time.Second // how often to check health during recovery
+	MaxRestartRecoveries          = 1                // max restart recoveries per import/restore
+)
+
 // AgentClient is an HTTP client for the Manticore agent
 type AgentClient struct {
 	baseURL    string
@@ -184,6 +192,31 @@ func (c *AgentClient) HealthProbe() (*types.HealthResponse, error) {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	return &healthResp, nil
+}
+
+// WaitForHealth polls the agent health endpoint until it responds successfully or the timeout expires.
+// Used to wait for an agent to recover after a pod restart.
+func (c *AgentClient) WaitForHealth(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(RestartHealthPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return fmt.Errorf("agent did not recover within %v", timeout)
+			}
+			if _, err := c.HealthProbe(); err != nil {
+				slog.Debug("agent not yet healthy", "error", err)
+				continue
+			}
+			slog.Info("agent health recovered", "baseURL", c.baseURL)
+			return nil
+		}
+	}
 }
 
 // Grastate returns the grastate.dat information for cluster repair decisions
@@ -394,7 +427,9 @@ func (c *AgentClient) ImportWithConfig(table, csvPath, cluster string, maxRetrie
 	return c.ImportWithContext(context.Background(), table, csvPath, cluster, maxRetries, config)
 }
 
-// ImportWithContext performs an async import with context support for cancellation
+// ImportWithContext performs an async import with context support for cancellation.
+// Includes restart resilience: if the agent becomes unreachable (e.g. pod restart),
+// waits up to 5 minutes for recovery and re-submits the import.
 func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
 	// Build import request from config
 	req := types.ImportRequest{
@@ -415,30 +450,67 @@ func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath, clu
 
 	slog.Debug("import job started", "jobId", jobID, "table", table, "method", config.Method)
 
-	// Poll for completion
+	// Poll for completion with restart recovery
 	deadline := time.Now().Add(config.PollTimeout)
 	ticker := time.NewTicker(config.PollInterval)
 	defer ticker.Stop()
 
+	consecutiveFailures := 0
+	restartRecoveries := 0
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Context cancelled - cancel the import job on the agent
 			slog.Info("import cancelled by context", "jobId", jobID)
 			c.CancelImport(jobID, 1)
 			return ctx.Err()
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				// Try to cancel the job before returning timeout error
 				c.CancelImport(jobID, 1)
 				return fmt.Errorf("import timeout after %v", config.PollTimeout)
 			}
 
-			job, err := c.GetImportStatus(jobID, maxRetries)
+			job, err := c.GetImportStatus(jobID, 1) // Use 1 retry for fast failure detection
 			if err != nil {
-				slog.Warn("failed to get import status", "jobId", jobID, "error", err)
-				continue // Keep polling on transient errors
+				consecutiveFailures++
+				slog.Warn("failed to get import status",
+					"jobId", jobID, "error", err,
+					"consecutiveFailures", consecutiveFailures)
+
+				if consecutiveFailures >= RestartMaxConsecutiveFailures {
+					if restartRecoveries >= MaxRestartRecoveries {
+						return fmt.Errorf("agent unreachable after %d restart recovery attempt(s): %w", restartRecoveries, err)
+					}
+
+					slog.Warn("agent appears to have restarted, waiting for recovery",
+						"table", table, "baseURL", c.baseURL)
+
+					if err := c.WaitForHealth(ctx, RestartRecoveryTimeout); err != nil {
+						return fmt.Errorf("agent did not recover: %w", err)
+					}
+
+					// Agent is back — re-submit the import
+					slog.Info("re-submitting import after agent restart", "table", table)
+					newJobID, err := c.StartImport(req, maxRetries)
+					if err != nil {
+						return fmt.Errorf("failed to re-start import after restart: %w", err)
+					}
+
+					jobID = newJobID
+					consecutiveFailures = 0
+					restartRecoveries++
+					// Extend deadline since we lost time waiting for recovery
+					deadline = time.Now().Add(config.PollTimeout)
+
+					slog.Info("import re-submitted after restart",
+						"newJobId", jobID, "table", table,
+						"recoveryAttempt", restartRecoveries)
+				}
+				continue
 			}
+
+			// Successful poll — reset failure counter
+			consecutiveFailures = 0
 
 			switch job.Status {
 			case types.ImportJobStatusCompleted:
@@ -450,7 +522,6 @@ func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath, clu
 				return fmt.Errorf("import was cancelled")
 			case types.ImportJobStatusPending, types.ImportJobStatusRunning:
 				slog.Debug("import job still running", "jobId", jobID, "status", job.Status)
-				// Continue polling
 			}
 		}
 	}
