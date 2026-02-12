@@ -154,14 +154,14 @@ export const Dashboard = () => {
 
   // Check if a backup is in progress for a specific table
   const getBackupForTable = (tableName: string) => {
-    return backupsData?.backups?.find(b => b.tableName === tableName);
+    return backupsData?.backups?.find(b => b.tableName === tableName && b.action === 'backup');
   };
 
   const selectedTableBackup = selectedBackupTable ? getBackupForTable(selectedBackupTable) : undefined;
 
-  // Check if a restore (scaling) is in progress for the selected restore table
+  // Check if a restore (scaling/starting) is in progress for the selected restore table
   const selectedRestoreOp = selectedRestoreTable
-    ? backupsData?.backups?.find(b => b.tableName === selectedRestoreTable && b.lifecycleStage === 'scaling')
+    ? backupsData?.backups?.find(b => b.tableName === selectedRestoreTable && b.action === 'restore')
     : undefined;
 
   // Mutations

@@ -235,7 +235,18 @@ func runRestore(cfg Config) error {
 	slog.Info("requesting agent to restore from backup")
 	jobID, err := agentClient.StartRestore(restoreReq, 0)
 	if err != nil {
-		return fmt.Errorf("failed to start restore on agent: %w", err)
+		slog.Warn("StartRestore failed, waiting for agent recovery before retrying",
+			"error", err, "baseURL", agentClient.BaseURL())
+
+		if healthErr := agentClient.WaitForHealth(context.Background(), client.StartRetryRecoveryTimeout); healthErr != nil {
+			return fmt.Errorf("failed to start restore on agent (agent did not recover): %w", err)
+		}
+
+		jobID, err = agentClient.StartRestore(restoreReq, 0)
+		if err != nil {
+			return fmt.Errorf("failed to start restore after agent recovery: %w", err)
+		}
+		slog.Info("StartRestore succeeded after agent recovery", "baseURL", agentClient.BaseURL())
 	}
 	slog.Info("restore job started", "jobId", jobID)
 

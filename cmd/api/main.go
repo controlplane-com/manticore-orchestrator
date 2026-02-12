@@ -2016,6 +2016,7 @@ type BackupStatus struct {
 	TableName      string `json:"tableName"`
 	CommandID      string `json:"commandId"`
 	LifecycleStage string `json:"lifecycleStage"`
+	Action         string `json:"action"` // "backup" or "restore"
 }
 
 // BackupsResponse represents the response for /api/backups
@@ -2058,6 +2059,7 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 				TableName:      dataset,
 				CommandID:      cmd.ID,
 				LifecycleStage: cmd.LifecycleStage,
+				Action:         "backup",
 			})
 		}
 	}
@@ -2080,6 +2082,7 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			backups = append(backups, BackupStatus{
 				TableName:      op.TableName,
 				LifecycleStage: op.Phase,
+				Action:         "restore",
 			})
 		}
 	}

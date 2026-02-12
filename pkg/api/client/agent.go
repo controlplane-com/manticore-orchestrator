@@ -22,6 +22,7 @@ const (
 	RestartRecoveryTimeout        = 5 * time.Minute  // max wait for agent to come back
 	RestartHealthPollInterval     = 10 * time.Second // how often to check health during recovery
 	MaxRestartRecoveries          = 1                // max restart recoveries per import/restore
+	StartRetryRecoveryTimeout     = 1 * time.Minute  // max wait for agent recovery when StartImport fails
 )
 
 // AgentClient is an HTTP client for the Manticore agent
@@ -442,10 +443,21 @@ func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath, clu
 		PrebuiltIndexPath: config.PrebuiltIndexPath,
 	}
 
-	// Start the async import
+	// Start the async import, with recovery if agent is temporarily unreachable
 	jobID, err := c.StartImport(req, maxRetries)
 	if err != nil {
-		return fmt.Errorf("failed to start import: %w", err)
+		slog.Warn("StartImport failed, waiting for agent recovery before retrying",
+			"table", table, "error", err, "baseURL", c.baseURL)
+
+		if healthErr := c.WaitForHealth(ctx, StartRetryRecoveryTimeout); healthErr != nil {
+			return fmt.Errorf("failed to start import (agent did not recover): %w", err)
+		}
+
+		jobID, err = c.StartImport(req, maxRetries)
+		if err != nil {
+			return fmt.Errorf("failed to start import after agent recovery: %w", err)
+		}
+		slog.Info("StartImport succeeded after agent recovery", "table", table, "baseURL", c.baseURL)
 	}
 
 	slog.Debug("import job started", "jobId", jobID, "table", table, "method", config.Method)
