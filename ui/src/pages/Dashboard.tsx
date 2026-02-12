@@ -8,7 +8,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner';
 import { FormSelect } from '../components/FormSelect';
 import { ConfirmActionModal } from '../components/ConfirmActionModal';
 import { useToast } from '../hooks/useToast';
-import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster, getBackupFiles, restoreTable, retryCommand } from '../api/orchestrator';
+import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster, getBackupFiles, restoreTable } from '../api/orchestrator';
 import {
   HeartIcon,
   TableCellsIcon,
@@ -213,20 +213,6 @@ export const Dashboard = () => {
     },
     onError: (error: any) => {
       toast.error('Restore failed', error.response?.data?.error || error.message);
-    },
-  });
-
-  const retryMutation = useMutation({
-    mutationFn: (params: { commandId: string; workload: 'orchestrator' | 'backup' }) =>
-      retryCommand(params),
-    onSuccess: (data) => {
-      toast.success('Retry started', data.message);
-      queryClient.invalidateQueries({ queryKey: ['imports'] });
-      queryClient.invalidateQueries({ queryKey: ['backups'] });
-      queryClient.invalidateQueries({ queryKey: ['command-history'] });
-    },
-    onError: (error: any) => {
-      toast.error('Retry failed', error.response?.data?.error || error.message);
     },
   });
 
