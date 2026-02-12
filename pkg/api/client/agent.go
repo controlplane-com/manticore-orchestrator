@@ -22,6 +22,7 @@ const (
 	RestartRecoveryTimeout        = 5 * time.Minute  // max wait for agent to come back
 	RestartHealthPollInterval     = 10 * time.Second // how often to check health during recovery
 	MaxRestartRecoveries          = 1                // max restart recoveries per import/restore
+	StartRetryRecoveryTimeout     = 1 * time.Minute  // max wait for agent recovery when StartImport fails
 )
 
 // AgentClient is an HTTP client for the Manticore agent

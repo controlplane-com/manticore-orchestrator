@@ -159,6 +159,7 @@ export interface BackupStatus {
   tableName: string;
   commandId?: string;
   lifecycleStage: 'scaling' | 'starting' | 'pending' | 'running' | 'completed' | 'failed';
+  action: 'backup' | 'restore';
 }
 
 // Backups response from /api/backups
