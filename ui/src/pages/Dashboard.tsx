@@ -418,6 +418,8 @@ export const Dashboard = () => {
                   <span className="text-sm text-blue-700 dark:text-blue-300">
                     {selectedTableImport.lifecycleStage === 'scaling'
                       ? `Scaling replicas for "${selectedTable}"...`
+                      : selectedTableImport.lifecycleStage === 'starting'
+                      ? `Starting import for "${selectedTable}"...`
                       : `Import ${selectedTableImport.lifecycleStage} for "${selectedTable}"`}
                   </span>
                   <Badge variant="info">{selectedTableImport.lifecycleStage}</Badge>

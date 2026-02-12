@@ -1493,16 +1493,17 @@ func (s *Server) handleImports(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Include operations still in scaling phase (not yet visible as CPLN commands)
+	// Include operations still in scaling/starting phase (not yet visible as CPLN commands)
 	for _, op := range s.getActiveOps() {
 		if op.Action != "import" {
 			continue
 		}
-		// Avoid duplicates if CPLN command already exists for this table
+		// If CPLN command already exists for this table, clear the local tracking
 		alreadyTracked := false
 		for _, imp := range imports {
 			if imp.TableName == op.TableName {
 				alreadyTracked = true
+				s.clearActiveOp(op.TableName) // CPLN has taken over
 				break
 			}
 		}
@@ -1958,9 +1959,18 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Command is now tracked by CPLN — clear our local tracking
-		s.clearActiveOp(tableName)
+		// Update phase — keep tracking until CPLN command is visible in query results.
+		// The handleImports endpoint deduplicates by table name, so once the CPLN command
+		// appears in QueryActiveCommands, the activeOp is ignored. We clear it after a
+		// short delay to give CPLN time to propagate.
+		s.setActiveOp(tableName, "import", "starting")
 		slog.Info("import cron workload started", "table", tableName, "commandId", cmd.ID)
+
+		// Give CPLN time to propagate the command, then clean up local tracking
+		go func() {
+			time.Sleep(30 * time.Second)
+			s.clearActiveOp(tableName)
+		}()
 
 		// Launch background goroutine to scale down after the command completes
 		if scaleErr == nil && originalMinScale > 0 {
@@ -2171,16 +2181,17 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Include operations still in scaling phase (not yet visible as CPLN commands)
+	// Include operations still in scaling/starting phase (not yet visible as CPLN commands)
 	for _, op := range s.getActiveOps() {
 		if op.Action != "restore" {
 			continue
 		}
-		// Avoid duplicates if CPLN command already exists for this table
+		// If CPLN command already exists for this table, clear the local tracking
 		alreadyTracked := false
 		for _, b := range backups {
 			if b.TableName == op.TableName {
 				alreadyTracked = true
+				s.clearActiveOp(op.TableName) // CPLN has taken over
 				break
 			}
 		}
@@ -2443,9 +2454,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Command is now tracked by CPLN — clear our local tracking
-		s.clearActiveOp(tableName)
+		// Update phase — keep tracking until CPLN command is visible in query results.
+		s.setActiveOp(tableName, "restore", "starting")
 		slog.Info("restore cron workload started", "table", tableName, "commandId", cmd.ID)
+
+		// Give CPLN time to propagate the command, then clean up local tracking
+		go func() {
+			time.Sleep(30 * time.Second)
+			s.clearActiveOp(tableName)
+		}()
 
 		// Launch background goroutine to scale down after the command completes
 		if scaleErr == nil && originalMinScale > 0 {
