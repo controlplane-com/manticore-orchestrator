@@ -123,7 +123,7 @@ export interface TableSchemaResponse {
 export interface ImportStatus {
   tableName: string;
   commandId?: string;
-  lifecycleStage: 'scaling' | 'pending' | 'running' | 'completed' | 'failed';
+  lifecycleStage: 'scaling' | 'starting' | 'pending' | 'running' | 'completed' | 'failed';
 }
 
 // Imports response from /api/imports
@@ -164,7 +164,7 @@ export interface BackupRequest {
 export interface BackupStatus {
   tableName: string;
   commandId?: string;
-  lifecycleStage: 'scaling' | 'pending' | 'running' | 'completed' | 'failed';
+  lifecycleStage: 'scaling' | 'starting' | 'pending' | 'running' | 'completed' | 'failed';
 }
 
 // Backups response from /api/backups
