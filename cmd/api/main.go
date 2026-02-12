@@ -507,7 +507,6 @@ func (s *Server) hasActiveOp(tableName string) bool {
 	return exists
 }
 
-
 // getTablesConfig parses the TABLES_CONFIG JSON
 func (s *Server) getTablesConfig() ([]TableConfig, error) {
 	var configMap map[string]string
@@ -1494,17 +1493,16 @@ func (s *Server) handleImports(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Include operations still in scaling/starting phase (not yet visible as CPLN commands)
+	// Include operations still in scaling phase (not yet visible as CPLN commands)
 	for _, op := range s.getActiveOps() {
 		if op.Action != "import" {
 			continue
 		}
-		// If CPLN command already exists for this table, clear the local tracking
+		// Avoid duplicates if CPLN command already exists for this table
 		alreadyTracked := false
 		for _, imp := range imports {
 			if imp.TableName == op.TableName {
 				alreadyTracked = true
-				s.clearActiveOp(op.TableName) // CPLN has taken over
 				break
 			}
 		}
@@ -1919,36 +1917,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Scale up to maxScale before starting the import
-	originalMinScale, _, scaleErr := s.scaleUpForOperation()
-	if scaleErr != nil {
-		slog.Warn("failed to scale up for import, proceeding anyway", "error", scaleErr)
-	}
-
-	// Start the cron workload with table-specific overrides
-	overrides := []cpln.ContainerOverride{
-		{
-			Name: "orchestrator",
-			Env: []cpln.EnvVar{
-				{Name: "ACTION", Value: "import"},
-				{Name: "TABLE_NAME", Value: req.TableName},
-				{Name: "IMPORT_POLL_INTERVAL", Value: os.Getenv("IMPORT_POLL_INTERVAL")},
-				{Name: "IMPORT_POLL_TIMEOUT", Value: os.Getenv("IMPORT_POLL_TIMEOUT")},
-			},
-		},
-	}
-
-	slog.Info("triggering import via cron workload", "table", req.TableName, "workload", orchestratorWorkload)
-	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, orchestratorWorkload, s.config.Location, overrides)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start import: %v", err))
-		return
-	}
-
-	// Launch background goroutine to scale down after the command completes
-	if scaleErr == nil && originalMinScale > 0 {
-		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, orchestratorWorkload)
-	}
+	// Track the operation for UI visibility and return immediately
+	s.setActiveOp(req.TableName, "import", "scaling")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -1988,18 +1958,10 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Update phase — keep tracking until CPLN command is visible in query results.
-		// The handleImports endpoint deduplicates by table name, so once the CPLN command
-		// appears in QueryActiveCommands, the activeOp is ignored. We clear it after a
-		// short delay to give CPLN time to propagate.
-		s.setActiveOp(tableName, "import", "starting")
+		// Command is now tracked by CPLN — clear our local tracking
+		s.clearActiveOp(tableName)
 		slog.Info("import cron workload started", "table", tableName, "commandId", cmd.ID)
 
-		// Give CPLN time to propagate the command, then clean up local tracking
-		go func() {
-			time.Sleep(30 * time.Second)
-			s.clearActiveOp(tableName)
-		}()
 
 		// Launch background goroutine to scale down after the command completes
 		if scaleErr == nil && originalMinScale > 0 {
@@ -2235,6 +2197,27 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Include operations still in scaling phase (not yet visible as CPLN commands)
+	for _, op := range s.getActiveOps() {
+		if op.Action != "restore" {
+			continue
+		}
+		// Avoid duplicates if CPLN command already exists for this table
+		alreadyTracked := false
+		for _, b := range backups {
+			if b.TableName == op.TableName {
+				alreadyTracked = true
+				break
+			}
+		}
+		if !alreadyTracked {
+			backups = append(backups, BackupStatus{
+				TableName:      op.TableName,
+				LifecycleStage: op.Phase,
+			})
+		}
+	}
+
 	response := BackupsResponse{
 		Backups: backups,
 	}
@@ -2450,31 +2433,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			"filename", req.Filename)
 	}
 
-	// Scale up to maxScale before starting the restore
-	originalMinScale, _, scaleErr := s.scaleUpForOperation()
-	if scaleErr != nil {
-		slog.Warn("failed to scale up for restore, proceeding anyway", "error", scaleErr)
-	}
-
-	// Start the backup cron workload with restore action
-	overrides := []cpln.ContainerOverride{
-		{
-			Name: s.config.BackupContainer,
-			Env:  envVars,
-		},
-	}
-
-	slog.Info("triggering restore via cron workload", "table", req.TableName, "type", req.Type, "filename", req.Filename, "workload", backupWorkload)
-	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start restore: %v", err))
-		return
-	}
-
-	// Launch background goroutine to scale down after the command completes
-	if scaleErr == nil && originalMinScale > 0 {
-		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, backupWorkload)
-	}
+	// Track the operation for UI visibility and return immediately
+	s.setActiveOp(req.TableName, "restore", "scaling")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -2509,15 +2469,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Update phase — keep tracking until CPLN command is visible in query results.
-		s.setActiveOp(tableName, "restore", "starting")
+		// Command is now tracked by CPLN — clear our local tracking
+		s.clearActiveOp(tableName)
 		slog.Info("restore cron workload started", "table", tableName, "commandId", cmd.ID)
 
-		// Give CPLN time to propagate the command, then clean up local tracking
-		go func() {
-			time.Sleep(30 * time.Second)
-			s.clearActiveOp(tableName)
-		}()
 
 		// Launch background goroutine to scale down after the command completes
 		if scaleErr == nil && originalMinScale > 0 {

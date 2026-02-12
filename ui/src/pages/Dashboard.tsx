@@ -159,9 +159,9 @@ export const Dashboard = () => {
 
   const selectedTableBackup = selectedBackupTable ? getBackupForTable(selectedBackupTable) : undefined;
 
-  // Check if a restore (scaling/starting) is in progress for the selected restore table
+  // Check if a restore (scaling) is in progress for the selected restore table
   const selectedRestoreOp = selectedRestoreTable
-    ? backupsData?.backups?.find(b => b.tableName === selectedRestoreTable && b.action === 'restore')
+    ? backupsData?.backups?.find(b => b.tableName === selectedRestoreTable && b.lifecycleStage === 'scaling')
     : undefined;
 
   // Mutations
@@ -418,8 +418,6 @@ export const Dashboard = () => {
                   <span className="text-sm text-blue-700 dark:text-blue-300">
                     {selectedTableImport.lifecycleStage === 'scaling'
                       ? `Scaling replicas for "${selectedTable}"...`
-                      : selectedTableImport.lifecycleStage === 'starting'
-                      ? `Starting import for "${selectedTable}"...`
                       : `Import ${selectedTableImport.lifecycleStage} for "${selectedTable}"`}
                   </span>
                   <Badge variant="info">{selectedTableImport.lifecycleStage}</Badge>
