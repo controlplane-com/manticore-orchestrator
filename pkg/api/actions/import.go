@@ -188,6 +188,17 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
+	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
+	// After a replica restart, the table may not exist even if the import reported success
+	// (manticore can crash from I/O pressure right after completing IMPORT TABLE).
+	slog.Debug("verifying table exists on all replicas before swap", "table", newMainTable)
+	for i, c := range ctx.Clients {
+		if err := verifyTableExists(goCtx, c, newMainTable, i); err != nil {
+			cleanup()
+			return fmt.Errorf("table verification failed: %w", err)
+		}
+	}
+
 	// Step 6: Atomic swap - ALTER distributed table on ALL replicas
 	// This is the critical step - all replicas must point to new table before dropping old
 	locals := []string{newMainTable, deltaTable}
@@ -284,6 +295,57 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	}
 
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
+}
+
+// verifyTableExists checks that a table exists on a specific replica, waiting up to 1 minute
+// for recovery if the replica restarted after import. This prevents proceeding to ALTER DISTRIBUTED
+// when a replica lost the table due to a crash right after IMPORT TABLE completed.
+func verifyTableExists(goCtx context.Context, c *client.AgentClient, table string, replicaIdx int) error {
+	maxAttempts := 6
+	pollInterval := 10 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		select {
+		case <-goCtx.Done():
+			return goCtx.Err()
+		default:
+		}
+
+		tables, err := c.ListTables(1)
+		if err != nil {
+			slog.Warn("table verification: replica unreachable, waiting for recovery",
+				"replica", replicaIdx, "attempt", attempt, "error", err)
+
+			if attempt < maxAttempts {
+				select {
+				case <-goCtx.Done():
+					return goCtx.Err()
+				case <-time.After(pollInterval):
+				}
+			}
+			continue
+		}
+
+		for _, t := range tables {
+			if t.Name == table {
+				slog.Debug("table verified on replica", "replica", replicaIdx, "table", table)
+				return nil
+			}
+		}
+
+		slog.Warn("table not found on replica after import",
+			"replica", replicaIdx, "table", table, "attempt", attempt)
+
+		if attempt < maxAttempts {
+			select {
+			case <-goCtx.Done():
+				return goCtx.Err()
+			case <-time.After(pollInterval):
+			}
+		}
+	}
+
+	return fmt.Errorf("table %s not found on replica %d after %d verification attempts (replica may have restarted and lost the table)", table, replicaIdx, maxAttempts)
 }
 
 // importWithIndexer builds index locally, uploads to S3 or shared volume, and imports on agents
