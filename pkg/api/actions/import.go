@@ -306,11 +306,11 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
 }
 
-// verifyTableExists checks that a table exists on a specific replica, waiting up to 1 minute
+// verifyTableExists checks that a table exists on a specific replica, waiting up to 10 minutes
 // for recovery if the replica restarted after import. This prevents proceeding to ALTER DISTRIBUTED
 // when a replica lost the table due to a crash right after IMPORT TABLE completed.
 func verifyTableExists(goCtx context.Context, c *client.AgentClient, table string, replicaIdx int) error {
-	maxAttempts := 6
+	maxAttempts := 60 // 60 attempts × 10s = 10 minutes
 	pollInterval := 10 * time.Second
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
