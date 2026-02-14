@@ -2448,11 +2448,14 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ALTER distributed table on each reachable replica
+	// ALTER distributed table on each reachable replica (with retry for rolling restarts)
 	slog.Info("swapping distributed table on reachable replicas", "table", distTable, "locals", locals, "agents", agents)
 	alterErrors := 0
 	for j, c := range reachableClients {
-		if err := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1); err != nil {
+		err := retryWithRecovery(r.Context(), fmt.Sprintf("alter distributed on replica %d", reachableIndices[j]), func() error {
+			return c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+		})
+		if err != nil {
 			slog.Error("failed to alter distributed table on replica", "replica", reachableIndices[j], "error", err)
 			alterErrors++
 			continue
@@ -2464,17 +2467,23 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove old table from cluster, then drop on reachable replicas
+	// Remove old table from cluster, then drop on reachable replicas (with retry for rolling restarts)
 	if tableConfig.ClusterMain {
 		slog.Info("removing old main table from cluster", "table", oldMainTable)
-		if err := primary.ClusterDrop(oldMainTable, 1); err != nil {
+		err := retryWithRecovery(r.Context(), "cluster drop "+oldMainTable, func() error {
+			return primary.ClusterDrop(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
 		}
 	}
 
 	slog.Info("dropping old main table on reachable replicas", "table", oldMainTable)
 	for j, c := range reachableClients {
-		if err := c.DropTable(oldMainTable, 1); err != nil {
+		err := retryWithRecovery(r.Context(), fmt.Sprintf("drop table %s on replica %d", oldMainTable, reachableIndices[j]), func() error {
+			return c.DropTable(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to drop old table", "table", oldMainTable, "replica", reachableIndices[j], "error", err)
 		}
 	}
@@ -2490,6 +2499,39 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 		"reachableReplicas": len(reachableClients),
 		"totalReplicas":     replicaCount,
 	})
+}
+
+// retryWithRecovery retries an operation every 30s for up to 5 minutes.
+// This handles replicas restarting during a rollout triggered by scaling.
+func retryWithRecovery(ctx context.Context, operation string, fn func() error) error {
+	maxAttempts := 20 // 20 attempts × 30s = 10 minutes
+	retryInterval := 30 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 1 {
+				slog.Info("operation succeeded after retry", "operation", operation, "attempt", attempt)
+			}
+			return nil
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		slog.Warn("operation failed, retrying after wait",
+			"operation", operation, "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
 }
 
 // extractAgentAddrFromClient converts an HTTP base URL to a Manticore agent address (hostname:9306)

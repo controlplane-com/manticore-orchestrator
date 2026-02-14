@@ -214,7 +214,10 @@ func Import(goCtx context.Context, ctx *Context) error {
 	}
 
 	for i, c := range ctx.Clients {
-		if err := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 0); err != nil {
+		err := retryWithRecovery(goCtx, fmt.Sprintf("alter distributed on replica %d", i), func() error {
+			return c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+		})
+		if err != nil {
 			return fmt.Errorf("failed to alter distributed table on replica %d: %w", i, err)
 		}
 		slog.Debug("swapped distributed table", "replica", i, "agents", agents)
@@ -223,7 +226,10 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Step 7: Remove old table from cluster (if it was clustered), then drop on ALL replicas
 	if tableConfig.ClusterMain {
 		slog.Debug("removing old main table from cluster", "table", oldMainTable)
-		if err := primary.ClusterDrop(oldMainTable, 0); err != nil {
+		err := retryWithRecovery(goCtx, "cluster drop "+oldMainTable, func() error {
+			return primary.ClusterDrop(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
 		}
 	}
@@ -231,7 +237,10 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Drop the table on each replica
 	slog.Debug("dropping old main table on all replicas", "table", oldMainTable)
 	for i, c := range ctx.Clients {
-		if err := c.DropTable(oldMainTable, 0); err != nil {
+		err := retryWithRecovery(goCtx, fmt.Sprintf("drop table %s on replica %d", oldMainTable, i), func() error {
+			return c.DropTable(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to drop old table", "table", oldMainTable, "replica", i, "error", err)
 		} else {
 			slog.Debug("dropped old table", "table", oldMainTable, "replica", i)
@@ -346,6 +355,40 @@ func verifyTableExists(goCtx context.Context, c *client.AgentClient, table strin
 	}
 
 	return fmt.Errorf("table %s not found on replica %d after %d verification attempts (replica may have restarted and lost the table)", table, replicaIdx, maxAttempts)
+}
+
+// retryWithRecovery retries an operation every 30s for up to 5 minutes.
+// This handles the case where a replica is restarting (e.g., from a rollout triggered by scaling)
+// and the operation fails because the agent is temporarily unavailable.
+func retryWithRecovery(ctx context.Context, operation string, fn func() error) error {
+	maxAttempts := 20 // 20 attempts × 30s = 10 minutes
+	retryInterval := 30 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 1 {
+				slog.Info("operation succeeded after retry", "operation", operation, "attempt", attempt)
+			}
+			return nil
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		slog.Warn("operation failed, retrying after wait",
+			"operation", operation, "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
 }
 
 // importWithIndexer builds index locally, uploads to S3 or shared volume, and imports on agents
