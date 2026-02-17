@@ -3,6 +3,7 @@ package cpln
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -32,14 +33,17 @@ func ScaleForOperation(client *Client, gvc, workloadName string) (maxScale int, 
 		slog.Info("all replicas ready after scale-up", "count", maxScale)
 	}
 
-	// Cleanup function restores the original minScale
+	// Cleanup function restores the original minScale (safe to call multiple times)
+	var once sync.Once
 	cleanup = func() {
-		slog.Info("restoring minScale after operation", "workload", workloadName, "minScale", minScale)
-		if err := client.PatchWorkloadMinScale(gvc, workloadName, minScale); err != nil {
-			slog.Error("failed to restore minScale", "error", err, "minScale", minScale)
-		} else {
-			slog.Info("minScale restored successfully", "workload", workloadName, "minScale", minScale)
-		}
+		once.Do(func() {
+			slog.Info("restoring minScale after operation", "workload", workloadName, "minScale", minScale)
+			if err := client.PatchWorkloadMinScale(gvc, workloadName, minScale); err != nil {
+				slog.Error("failed to restore minScale", "error", err, "minScale", minScale)
+			} else {
+				slog.Info("minScale restored successfully", "workload", workloadName, "minScale", minScale)
+			}
+		})
 	}
 
 	return maxScale, cleanup, nil

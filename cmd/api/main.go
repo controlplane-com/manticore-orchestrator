@@ -2611,6 +2611,9 @@ func runCLI(config Config) {
 		os.Exit(1)
 	}
 
+	// Scale down before exiting (defer won't run if os.Exit is called)
+	scaleCleanup()
+
 	if actionErr != nil {
 		slog.Error("action failed", "action", action, "error", actionErr)
 		os.Exit(1)
