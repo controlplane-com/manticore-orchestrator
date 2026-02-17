@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cpln"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
 
@@ -34,6 +35,12 @@ type Config struct {
 	BackupSlot        string // for blue-green restore
 	OrchestratorURL   string // for blue-green rotation
 	TableName         string // derived from Dataset + Type + Slot
+
+	// CPLN scaling fields (optional, passed as overrides for restore operations)
+	CplnToken     string // CPLN API token for scaling
+	CplnOrg       string // CPLN org for scaling
+	GVC           string // GVC containing the workload to scale
+	ScaleWorkload string // Name of the manticore workload to scale
 }
 
 func getEnv(key, defaultVal string) string {
@@ -68,6 +75,10 @@ func loadConfig() Config {
 		RestoreFile:       getEnv("RESTORE_FILE", ""),
 		BackupSlot:        getEnv("BACKUP_SLOT", ""),
 		OrchestratorURL:   getEnv("ORCHESTRATOR_API_URL", ""),
+		CplnToken:         getEnv("CPLN_TOKEN", ""),
+		CplnOrg:           getEnv("CPLN_ORG", ""),
+		GVC:               getEnv("GVC", ""),
+		ScaleWorkload:     getEnv("SCALE_WORKLOAD", ""),
 	}
 
 	// Derive table name from type
@@ -177,6 +188,17 @@ func runBackup(cfg Config) error {
 func runRestore(cfg Config) error {
 	if cfg.RestoreFile == "" {
 		return fmt.Errorf("RESTORE_FILE env var is required for restore action")
+	}
+
+	// Scale up replicas before restore if CPLN credentials are available
+	if cfg.CplnToken != "" && cfg.CplnOrg != "" && cfg.ScaleWorkload != "" {
+		cplnClient := cpln.NewClient(cfg.CplnToken, cfg.CplnOrg)
+		_, cleanup, err := cpln.ScaleForOperation(cplnClient, cfg.GVC, cfg.ScaleWorkload)
+		if err != nil {
+			slog.Warn("failed to scale up for restore, proceeding anyway", "error", err)
+		} else {
+			defer cleanup()
+		}
 	}
 
 	// For blue-green main restore: BACKUP_SLOT is the slot the backup was taken from

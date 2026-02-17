@@ -78,7 +78,7 @@ type Config struct {
 type ActiveOperation struct {
 	TableName string    `json:"tableName"`
 	Action    string    `json:"action"`    // "import" or "restore"
-	Phase     string    `json:"phase"`     // "scaling", "starting"
+	Phase     string    `json:"phase"`     // "starting"
 	StartedAt time.Time `json:"startedAt"`
 	Error     string    `json:"error,omitempty"`
 }
@@ -404,68 +404,7 @@ func (s *Server) buildClients(replicaCount int) []*client.AgentClient {
 	return clients
 }
 
-// scaleUpForOperation scales the manticore workload to maxScale before a data operation.
-// Returns the original minScale (for later restore) and maxScale, or skips if already at full scale.
-func (s *Server) scaleUpForOperation() (originalMinScale int, maxScale int, err error) {
-	if s.cplnClient == nil {
-		return 0, 0, fmt.Errorf("CPLN client not configured")
-	}
 
-	minScale, maxScale, err := s.cplnClient.GetWorkloadScaling(s.config.GVC, s.config.WorkloadName)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get workload scaling: %w", err)
-	}
-
-	if minScale >= maxScale {
-		slog.Info("workload already at full scale, skipping scale-up", "minScale", minScale, "maxScale", maxScale)
-		return 0, maxScale, nil // 0 signals no scale-down needed
-	}
-
-	slog.Info("scaling up workload for operation", "workload", s.config.WorkloadName, "minScale", minScale, "maxScale", maxScale)
-	if err := s.cplnClient.PatchWorkloadMinScale(s.config.GVC, s.config.WorkloadName, maxScale); err != nil {
-		return 0, 0, fmt.Errorf("failed to patch minScale: %w", err)
-	}
-
-	// Wait for all replicas to be ready (5 min timeout)
-	if err := s.cplnClient.WaitForReplicasReady(s.config.GVC, s.config.WorkloadName, maxScale, 5*time.Minute); err != nil {
-		slog.Warn("timed out waiting for replicas, proceeding anyway", "error", err, "maxScale", maxScale)
-	} else {
-		slog.Info("all replicas ready", "count", maxScale)
-	}
-
-	return minScale, maxScale, nil
-}
-
-// scaleDownAfterOperation polls a CPLN command until it completes, then restores minScale.
-// Designed to run as a goroutine.
-func (s *Server) scaleDownAfterOperation(originalMinScale int, commandID, commandWorkload string) {
-	const pollInterval = 15 * time.Second
-
-	slog.Info("watching command for scale-down", "commandId", commandID, "workload", commandWorkload, "originalMinScale", originalMinScale)
-
-	for {
-		time.Sleep(pollInterval)
-
-		cmd, err := s.cplnClient.GetCommand(s.config.GVC, commandWorkload, commandID)
-		if err != nil {
-			slog.Warn("failed to poll command for scale-down", "commandId", commandID, "error", err)
-			continue
-		}
-
-		switch cmd.LifecycleStage {
-		case "completed", "failed":
-			slog.Info("command finished, restoring minScale", "commandId", commandID, "lifecycleStage", cmd.LifecycleStage, "originalMinScale", originalMinScale)
-			if err := s.cplnClient.PatchWorkloadMinScale(s.config.GVC, s.config.WorkloadName, originalMinScale); err != nil {
-				slog.Error("failed to restore minScale after operation", "error", err, "originalMinScale", originalMinScale)
-			} else {
-				slog.Info("minScale restored", "minScale", originalMinScale)
-			}
-			return
-		default:
-			slog.Debug("command still running, waiting for scale-down", "commandId", commandID, "lifecycleStage", cmd.LifecycleStage)
-		}
-	}
-}
 
 // setActiveOp records an active operation for UI visibility
 func (s *Server) setActiveOp(tableName, action, phase string) {
@@ -1226,8 +1165,12 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build env overrides
-	envVars := []cpln.EnvVar{{Name: "ACTION", Value: "repair"}}
+	// Build env overrides — pass CPLN credentials so cron can handle its own scaling
+	envVars := []cpln.EnvVar{
+		{Name: "ACTION", Value: "repair"},
+		{Name: "CPLN_TOKEN", Value: s.config.CplnToken},
+		{Name: "CPLN_ORG", Value: s.config.Org},
+	}
 	if req.SourceReplica != nil {
 		envVars = append(envVars, cpln.EnvVar{
 			Name:  "REPAIR_SOURCE_REPLICA",
@@ -1800,32 +1743,29 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Track the operation for UI visibility and return immediately
-	s.setActiveOp(req.TableName, "import", "scaling")
+	s.setActiveOp(req.TableName, "import", "starting")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "accepted",
-		"message": fmt.Sprintf("import starting for table %s (scaling replicas)", req.TableName),
+		"message": fmt.Sprintf("import starting for table %s", req.TableName),
 	})
 
-	// Run scaling + cron start in background
+	// Start cron in background (scaling is handled by the cron job itself)
 	go func() {
 		tableName := req.TableName
 
-		// Scale up to maxScale before starting the import
-		originalMinScale, _, scaleErr := s.scaleUpForOperation()
-		if scaleErr != nil {
-			slog.Warn("failed to scale up for import, proceeding anyway", "error", scaleErr)
-		}
-
 		// Start the cron workload with table-specific overrides
+		// Pass CPLN credentials so the cron can handle its own scaling
 		overrides := []cpln.ContainerOverride{
 			{
 				Name: "orchestrator",
 				Env: []cpln.EnvVar{
 					{Name: "ACTION", Value: "import"},
 					{Name: "TABLE_NAME", Value: tableName},
+					{Name: "CPLN_TOKEN", Value: s.config.CplnToken},
+					{Name: "CPLN_ORG", Value: s.config.Org},
 					{Name: "IMPORT_POLL_INTERVAL", Value: os.Getenv("IMPORT_POLL_INTERVAL")},
 					{Name: "IMPORT_POLL_TIMEOUT", Value: os.Getenv("IMPORT_POLL_TIMEOUT")},
 				},
@@ -1852,11 +1792,6 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(30 * time.Second)
 			s.clearActiveOp(tableName)
 		}()
-
-		// Launch background goroutine to scale down after the command completes
-		if scaleErr == nil && originalMinScale > 0 {
-			go s.scaleDownAfterOperation(originalMinScale, cmd.ID, orchestratorWorkload)
-		}
 	}()
 }
 
@@ -1937,13 +1872,7 @@ func (s *Server) triggerBackup(tableName, backupType string) (string, error) {
 		slog.Info("discovered active slot for main backup", "table", tableName, "slot", slot)
 	}
 
-	// Scale up to maxScale before starting the backup
-	originalMinScale, _, scaleErr := s.scaleUpForOperation()
-	if scaleErr != nil {
-		slog.Warn("failed to scale up for backup, proceeding anyway", "error", scaleErr)
-	}
-
-	// Start the backup cron workload with overrides
+	// Start the backup cron workload with overrides (no scaling needed for backups — single replica only)
 	overrides := []cpln.ContainerOverride{
 		{
 			Name: s.config.BackupContainer,
@@ -1955,11 +1884,6 @@ func (s *Server) triggerBackup(tableName, backupType string) (string, error) {
 	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
 	if err != nil {
 		return "", fmt.Errorf("failed to start backup: %v", err)
-	}
-
-	// Launch background goroutine to scale down after the command completes
-	if scaleErr == nil && originalMinScale > 0 {
-		go s.scaleDownAfterOperation(originalMinScale, cmd.ID, backupWorkload)
 	}
 
 	return cmd.ID, nil
@@ -2241,12 +2165,16 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build env vars for cron workload
+	// Build env vars for cron workload — pass CPLN credentials so cron can handle its own scaling
 	envVars := []cpln.EnvVar{
 		{Name: "ACTION", Value: "restore"},
 		{Name: "DATASET", Value: req.TableName},
 		{Name: "TYPE", Value: req.Type},
 		{Name: "RESTORE_FILE", Value: req.Filename},
+		{Name: "CPLN_TOKEN", Value: s.config.CplnToken},
+		{Name: "CPLN_ORG", Value: s.config.Org},
+		{Name: "GVC", Value: s.config.GVC},
+		{Name: "SCALE_WORKLOAD", Value: s.config.WorkloadName},
 	}
 
 	// For main table restore, use blue-green: discover active slot, target inactive
@@ -2303,24 +2231,18 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Track the operation for UI visibility and return immediately
-	s.setActiveOp(req.TableName, "restore", "scaling")
+	s.setActiveOp(req.TableName, "restore", "starting")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "accepted",
-		"message": fmt.Sprintf("%s restore starting for table %s (scaling replicas)", req.Type, req.TableName),
+		"message": fmt.Sprintf("%s restore starting for table %s", req.Type, req.TableName),
 	})
 
-	// Run scaling + cron start in background
+	// Start cron in background (scaling is handled by the cron job itself)
 	go func() {
 		tableName := req.TableName
-
-		// Scale up to maxScale before starting the restore
-		originalMinScale, _, scaleErr := s.scaleUpForOperation()
-		if scaleErr != nil {
-			slog.Warn("failed to scale up for restore, proceeding anyway", "error", scaleErr)
-		}
 
 		// Start the backup cron workload with restore action
 		overrides := []cpln.ContainerOverride{
@@ -2338,8 +2260,6 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Update phase — keep tracking until CPLN command is visible in query results.
-		s.setActiveOp(tableName, "restore", "starting")
 		slog.Info("restore cron workload started", "table", tableName, "commandId", cmd.ID)
 
 		// Give CPLN time to propagate the command, then clean up local tracking
@@ -2347,11 +2267,6 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(30 * time.Second)
 			s.clearActiveOp(tableName)
 		}()
-
-		// Launch background goroutine to scale down after the command completes
-		if scaleErr == nil && originalMinScale > 0 {
-			go s.scaleDownAfterOperation(originalMinScale, cmd.ID, backupWorkload)
-		}
 	}()
 }
 
@@ -2559,14 +2474,34 @@ func runCLI(config Config) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	// Scale up replicas for import/repair operations if CPLN credentials are available
+	var scaleCleanup func()
+	replicaCount := getEnvInt("REPLICA_COUNT", 2)
+
+	cplnToken := os.Getenv("CPLN_TOKEN")
+	cplnOrg := os.Getenv("CPLN_ORG")
+	if cplnToken != "" && cplnOrg != "" && (action == "import" || action == "repair") {
+		cplnClient := cpln.NewClient(cplnToken, cplnOrg)
+		maxScale, cleanup, err := cpln.ScaleForOperation(cplnClient, config.GVC, config.WorkloadName)
+		if err != nil {
+			slog.Warn("failed to scale up, proceeding with current replica count", "error", err)
+			scaleCleanup = func() {}
+		} else {
+			scaleCleanup = cleanup
+			replicaCount = maxScale // Use actual scaled count instead of static env var
+			slog.Info("replica count updated from scaling", "replicaCount", replicaCount)
+		}
+	} else {
+		scaleCleanup = func() {}
+	}
+	defer scaleCleanup()
+
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, initiating graceful shutdown", "signal", sig)
+		scaleCleanup() // Restore minScale before shutting down
 		cancel()
 	}()
-
-	// For CLI mode, we still need REPLICA_COUNT since we may not have cpln access
-	replicaCount := getEnvInt("REPLICA_COUNT", 2)
 
 	// TABLE_NAME is only required for import action
 	var csvPath string
