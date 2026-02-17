@@ -191,11 +191,27 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
 	// After a replica restart, the table may not exist even if the import reported success
 	// (manticore can crash from I/O pressure right after completing IMPORT TABLE).
+	// If a table is missing on a non-clustered replica, re-run the import on that replica.
 	slog.Debug("verifying table exists on all replicas before swap", "table", newMainTable)
 	for i, c := range ctx.Clients {
 		if err := verifyTableExists(goCtx, c, newMainTable, i); err != nil {
-			cleanup()
-			return fmt.Errorf("table verification failed: %w", err)
+			if !tableConfig.ClusterMain {
+				// Non-clustered: table won't reappear via replication, re-import on this replica
+				slog.Warn("table missing on non-clustered replica, re-importing",
+					"replica", i, "table", newMainTable, "verifyErr", err)
+				if reimportErr := c.ImportWithContext(goCtx, newMainTable, ctx.CSVPath, "", 0, importConfig); reimportErr != nil {
+					cleanup()
+					return fmt.Errorf("re-import on replica %d failed: %w", i, reimportErr)
+				}
+				// Verify again after re-import
+				if err := verifyTableExists(goCtx, c, newMainTable, i); err != nil {
+					cleanup()
+					return fmt.Errorf("table verification failed after re-import on replica %d: %w", i, err)
+				}
+			} else {
+				cleanup()
+				return fmt.Errorf("table verification failed: %w", err)
+			}
 		}
 	}
 
@@ -306,11 +322,23 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
 }
 
-// verifyTableExists checks that a table exists on a specific replica, waiting up to 10 minutes
-// for recovery if the replica restarted after import. This prevents proceeding to ALTER DISTRIBUTED
-// when a replica lost the table due to a crash right after IMPORT TABLE completed.
+// verifyTableExists checks that a table exists on a specific replica.
+// First waits up to 10 minutes for the agent to become reachable (handles rolling restarts),
+// then checks for the table with a shorter timeout.
 func verifyTableExists(goCtx context.Context, c *client.AgentClient, table string, replicaIdx int) error {
-	maxAttempts := 60 // 60 attempts × 10s = 10 minutes
+	// Phase 1: Wait for the agent to be reachable (up to 10 minutes).
+	// During a rolling restart the agent returns 503 or is unreachable entirely.
+	// WaitForHealth uses /api/health which bypasses K8s readiness gates.
+	healthTimeout := 10 * time.Minute
+	slog.Debug("waiting for agent health before table verification", "replica", replicaIdx, "timeout", healthTimeout)
+	if err := c.WaitForHealth(goCtx, healthTimeout); err != nil {
+		return fmt.Errorf("replica %d did not become healthy within %v: %w", replicaIdx, healthTimeout, err)
+	}
+
+	// Phase 2: Agent is healthy — verify the table exists.
+	// After a restart with clustered tables, the table should reappear via Galera SST.
+	// Poll for up to 2 minutes to allow replication/SST to complete.
+	maxAttempts := 12 // 12 attempts × 10s = 2 minutes
 	pollInterval := 10 * time.Second
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -322,9 +350,8 @@ func verifyTableExists(goCtx context.Context, c *client.AgentClient, table strin
 
 		tables, err := c.ListTables(1)
 		if err != nil {
-			slog.Warn("table verification: replica unreachable, waiting for recovery",
+			slog.Warn("table verification: ListTables failed on healthy agent",
 				"replica", replicaIdx, "attempt", attempt, "error", err)
-
 			if attempt < maxAttempts {
 				select {
 				case <-goCtx.Done():
@@ -354,7 +381,7 @@ func verifyTableExists(goCtx context.Context, c *client.AgentClient, table strin
 		}
 	}
 
-	return fmt.Errorf("table %s not found on replica %d after %d verification attempts (replica may have restarted and lost the table)", table, replicaIdx, maxAttempts)
+	return fmt.Errorf("table %s not found on replica %d after agent recovered (table may have been lost during restart)", table, replicaIdx)
 }
 
 // retryWithRecovery retries an operation every 30s for up to 5 minutes.
