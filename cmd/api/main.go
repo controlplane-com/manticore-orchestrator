@@ -1165,11 +1165,9 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build env overrides — pass CPLN credentials so cron can handle its own scaling
+	// Build env overrides (cron uses its own platform-injected CPLN_TOKEN for scaling)
 	envVars := []cpln.EnvVar{
 		{Name: "ACTION", Value: "repair"},
-		{Name: "CPLN_TOKEN", Value: s.config.CplnToken},
-		{Name: "CPLN_ORG", Value: s.config.Org},
 	}
 	if req.SourceReplica != nil {
 		envVars = append(envVars, cpln.EnvVar{
@@ -1757,15 +1755,13 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		tableName := req.TableName
 
 		// Start the cron workload with table-specific overrides
-		// Pass CPLN credentials so the cron can handle its own scaling
+		// Cron uses its own platform-injected CPLN_TOKEN for scaling
 		overrides := []cpln.ContainerOverride{
 			{
 				Name: "orchestrator",
 				Env: []cpln.EnvVar{
 					{Name: "ACTION", Value: "import"},
 					{Name: "TABLE_NAME", Value: tableName},
-					{Name: "CPLN_TOKEN", Value: s.config.CplnToken},
-					{Name: "CPLN_ORG", Value: s.config.Org},
 					{Name: "IMPORT_POLL_INTERVAL", Value: os.Getenv("IMPORT_POLL_INTERVAL")},
 					{Name: "IMPORT_POLL_TIMEOUT", Value: os.Getenv("IMPORT_POLL_TIMEOUT")},
 				},
@@ -2171,9 +2167,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		{Name: "DATASET", Value: req.TableName},
 		{Name: "TYPE", Value: req.Type},
 		{Name: "RESTORE_FILE", Value: req.Filename},
-		{Name: "CPLN_TOKEN", Value: s.config.CplnToken},
-		{Name: "CPLN_ORG", Value: s.config.Org},
-		{Name: "GVC", Value: s.config.GVC},
+		{Name: "SCALE_ORG", Value: s.config.Org},
+		{Name: "SCALE_GVC", Value: s.config.GVC},
 		{Name: "SCALE_WORKLOAD", Value: s.config.WorkloadName},
 	}
 
@@ -2478,10 +2473,8 @@ func runCLI(config Config) {
 	var scaleCleanup func()
 	replicaCount := getEnvInt("REPLICA_COUNT", 2)
 
-	cplnToken := os.Getenv("CPLN_TOKEN")
-	cplnOrg := os.Getenv("CPLN_ORG")
-	if cplnToken != "" && cplnOrg != "" && (action == "import" || action == "repair") {
-		cplnClient := cpln.NewClient(cplnToken, cplnOrg)
+	if config.CplnToken != "" && config.Org != "" && (action == "import" || action == "repair") {
+		cplnClient := cpln.NewClient(config.CplnToken, config.Org)
 		maxScale, cleanup, err := cpln.ScaleForOperation(cplnClient, config.GVC, config.WorkloadName)
 		if err != nil {
 			slog.Warn("failed to scale up, proceeding with current replica count", "error", err)

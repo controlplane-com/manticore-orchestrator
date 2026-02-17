@@ -76,8 +76,8 @@ func loadConfig() Config {
 		BackupSlot:        getEnv("BACKUP_SLOT", ""),
 		OrchestratorURL:   getEnv("ORCHESTRATOR_API_URL", ""),
 		CplnToken:         getEnv("CPLN_TOKEN", ""),
-		CplnOrg:           getEnv("CPLN_ORG", ""),
-		GVC:               getEnv("GVC", ""),
+		CplnOrg:           getEnv("SCALE_ORG", ""),
+		GVC:               getEnv("SCALE_GVC", ""),
 		ScaleWorkload:     getEnv("SCALE_WORKLOAD", ""),
 	}
 
