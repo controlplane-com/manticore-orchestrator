@@ -1,5 +1,5 @@
 # Manticore Build System
-REGISTRY ?= ghcr.io/cuppojoe
+REGISTRY ?= ghcr.io/controlplane-com/manticore-orchestrator
 API_IMAGE ?= $(REGISTRY)/manticore-cpln-api
 AGENT_IMAGE ?= $(REGISTRY)/manticore-cpln-agent
 UI_IMAGE ?= $(REGISTRY)/manticore-cpln-ui

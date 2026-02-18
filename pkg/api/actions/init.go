@@ -486,11 +486,9 @@ func stepCreateTables(ctx *initContext) error {
 		if slot == "" {
 			slot = "a" // Default
 		}
-		mainTable := table.Name + "_main_" + slot
-		deltaTable := table.Name + "_delta"
 		distTable := table.Name
 
-		// Fetch table config to determine cluster membership and HA options
+		// Fetch table config to determine cluster membership, HA options, and segment count
 		tableConfig, err := primaryClient.GetTableConfig(table.Name, 1)
 		if err != nil {
 			slog.Warn("failed to fetch table config, using defaults", "table", table.Name, "error", err)
@@ -499,55 +497,16 @@ func stepCreateTables(ctx *initContext) error {
 				ClusterMain:     true,
 				HAStrategy:      "nodeads",
 				AgentRetryCount: 0,
+				SegmentCount:    1,
 			}
 		}
 
-		slog.Debug("creating tables", "main", mainTable, "delta", deltaTable, "distributed", distTable, "clusterMain", tableConfig.ClusterMain)
-
-		// Create delta table (idempotent)
-		if err := primaryClient.CreateTable(deltaTable, 0); err != nil {
-			slog.Debug("delta table creation (may already exist)", "table", deltaTable, "error", err)
+		segmentCount := tableConfig.SegmentCount
+		if segmentCount < 1 {
+			segmentCount = 1
 		}
 
-		// Add delta table to cluster (idempotent) - delta is always clustered
-		if err := primaryClient.ClusterAdd(deltaTable, 0); err != nil {
-			slog.Debug("delta table cluster add (may already be added)", "table", deltaTable, "error", err)
-		}
-
-		// Create main table (idempotent)
-		if err := primaryClient.CreateTable(mainTable, 0); err != nil {
-			slog.Debug("main table creation (may already exist)", "table", mainTable, "error", err)
-		}
-
-		// Conditionally add main table to cluster based on schema config
-		if tableConfig.ClusterMain {
-			if err := primaryClient.ClusterAdd(mainTable, 0); err != nil {
-				slog.Debug("main table cluster add (may already be added)", "table", mainTable, "error", err)
-			}
-		} else {
-			// When not clustered, create the main table on all other replicas
-			slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", mainTable)
-			for i, c := range ctx.clients {
-				if c == primaryClient {
-					continue // Already created on primary
-				}
-				if err := c.CreateTable(mainTable, 0); err != nil {
-					slog.Debug("main table creation on replica (may already exist)", "table", mainTable, "replica", i, "error", err)
-				}
-			}
-		}
-
-		// Wait for delta table replication (always clustered)
-		if err := waitForTableReplication(ctx.clients, deltaTable); err != nil {
-			slog.Warn("timeout waiting for delta table replication", "table", deltaTable, "error", err)
-		}
-
-		// Wait for main table replication only if clustered
-		if tableConfig.ClusterMain {
-			if err := waitForTableReplication(ctx.clients, mainTable); err != nil {
-				slog.Warn("timeout waiting for main table replication", "table", mainTable, "error", err)
-			}
-		}
+		slog.Debug("creating tables", "distributed", distTable, "segmentCount", segmentCount, "clusterMain", tableConfig.ClusterMain)
 
 		// Build agent list: ALL replicas (same config everywhere)
 		var agents []string
@@ -558,10 +517,70 @@ func stepCreateTables(ctx *initContext) error {
 			}
 		}
 
+		var allLocals []string
+		for seg := 1; seg <= segmentCount; seg++ {
+			var mainTable, deltaTable string
+			if segmentCount == 1 {
+				mainTable = table.Name + "_main_" + slot
+				deltaTable = table.Name + "_delta"
+			} else {
+				mainTable = fmt.Sprintf("%s_main_%s_%d", table.Name, slot, seg)
+				deltaTable = fmt.Sprintf("%s_delta_%d", table.Name, seg)
+			}
+
+			slog.Debug("creating segment tables", "main", mainTable, "delta", deltaTable)
+
+			// Create delta table (idempotent)
+			if err := primaryClient.CreateTable(deltaTable, 0); err != nil {
+				slog.Debug("delta table creation (may already exist)", "table", deltaTable, "error", err)
+			}
+
+			// Add delta table to cluster (idempotent) - delta is always clustered
+			if err := primaryClient.ClusterAdd(deltaTable, 0); err != nil {
+				slog.Debug("delta table cluster add (may already be added)", "table", deltaTable, "error", err)
+			}
+
+			// Create main table (idempotent)
+			if err := primaryClient.CreateTable(mainTable, 0); err != nil {
+				slog.Debug("main table creation (may already exist)", "table", mainTable, "error", err)
+			}
+
+			// Conditionally add main table to cluster based on schema config
+			if tableConfig.ClusterMain {
+				if err := primaryClient.ClusterAdd(mainTable, 0); err != nil {
+					slog.Debug("main table cluster add (may already be added)", "table", mainTable, "error", err)
+				}
+			} else {
+				// When not clustered, create the main table on all other replicas
+				slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", mainTable)
+				for i, c := range ctx.clients {
+					if c == primaryClient {
+						continue // Already created on primary
+					}
+					if err := c.CreateTable(mainTable, 0); err != nil {
+						slog.Debug("main table creation on replica (may already exist)", "table", mainTable, "replica", i, "error", err)
+					}
+				}
+			}
+
+			// Wait for delta table replication (always clustered)
+			if err := waitForTableReplication(ctx.clients, deltaTable); err != nil {
+				slog.Warn("timeout waiting for delta table replication", "table", deltaTable, "error", err)
+			}
+
+			// Wait for main table replication only if clustered
+			if tableConfig.ClusterMain {
+				if err := waitForTableReplication(ctx.clients, mainTable); err != nil {
+					slog.Warn("timeout waiting for main table replication", "table", mainTable, "error", err)
+				}
+			}
+
+			allLocals = append(allLocals, mainTable, deltaTable)
+		}
+
 		// Create distributed table on all replicas with mirror agents (idempotent)
-		locals := []string{mainTable, deltaTable}
 		for i, c := range ctx.clients {
-			if err := c.CreateDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 0); err != nil {
+			if err := c.CreateDistributed(distTable, allLocals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 0); err != nil {
 				slog.Debug("distributed table creation (may already exist)", "table", distTable, "replica", i, "error", err)
 			}
 		}
