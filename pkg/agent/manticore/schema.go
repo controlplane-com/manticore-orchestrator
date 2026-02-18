@@ -45,6 +45,7 @@ type Schema struct {
 	AgentRetryCount int    // Retry count for failed agents, defaults to 0
 	MemLimit        string // Indexer memory limit, defaults to "2G"
 	HasHeader       *bool  // Whether source file has a header row, nil = auto-detect
+	CharsetTable    string // Manticore charset_table option (e.g. "non_cont"), empty = use default
 }
 
 // csv-to-manticore type to ColumnType mapping
@@ -107,7 +108,11 @@ func (s *Schema) GenerateCreateTableSQL(tableName string) string {
 		columns = append(columns, fmt.Sprintf("%s %s", col.Name, rtType))
 	}
 
-	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", tableName, strings.Join(columns, ", "))
+	sql := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", tableName, strings.Join(columns, ", "))
+	if s.CharsetTable != "" {
+		sql += fmt.Sprintf(" charset_table='%s'", s.CharsetTable)
+	}
+	return sql
 }
 
 // CSVHasHeader checks if the first field of the first row is not a number (indicating a header)
@@ -155,6 +160,7 @@ type TableBehaviorConfig struct {
 	AgentRetryCount *int   `yaml:"agentRetryCount" json:"agentRetryCount"` // Pointer for nil-check (default 0)
 	MemLimit        string `yaml:"memLimit" json:"memLimit"`               // Indexer memory limit (default "2G")
 	HasHeader       *bool  `yaml:"hasHeader" json:"hasHeader"`             // Whether source file has a header row (default: auto-detect)
+	CharsetTable    string `yaml:"charsetTable" json:"charsetTable"`       // Manticore charset_table option (e.g. "non_cont")
 }
 
 // SchemaConfig represents the YAML structure for a single table schema (JSON format)
@@ -221,6 +227,7 @@ func (r *SchemaRegistry) LoadFromFile(path string) error {
 			AgentRetryCount: agentRetryCount,
 			MemLimit:        config.Config.MemLimit,
 			HasHeader:       config.Config.HasHeader,
+			CharsetTable:    config.Config.CharsetTable,
 		}
 	}
 

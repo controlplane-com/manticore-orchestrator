@@ -774,6 +774,7 @@ type TableConfigResponse struct {
 	AgentRetryCount int                `json:"agentRetryCount"`
 	MemLimit        string             `json:"memLimit,omitempty"`
 	HasHeader       *bool              `json:"hasHeader,omitempty"`
+	CharsetTable    string             `json:"charsetTable,omitempty"`
 	Columns         []manticore.Column `json:"columns,omitempty"`
 }
 
@@ -804,6 +805,7 @@ func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
 		AgentRetryCount: schema.AgentRetryCount,
 		MemLimit:        schema.MemLimit,
 		HasHeader:       schema.HasHeader,
+		CharsetTable:    schema.CharsetTable,
 		Columns:         schema.Columns,
 	})
 }
