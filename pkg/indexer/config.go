@@ -31,6 +31,9 @@ func GenerateIndexerConfig(cfg *Config) string {
 	sb.WriteString("    type = plain\n")
 	sb.WriteString(fmt.Sprintf("    source = %s_source\n", cfg.PlainName))
 	sb.WriteString(fmt.Sprintf("    path = %s/data/%s\n", cfg.WorkDir, cfg.PlainName))
+	if cfg.CharsetTable != "" {
+		sb.WriteString(fmt.Sprintf("    charset_table = %s\n", cfg.CharsetTable))
+	}
 	sb.WriteString("}\n\n")
 
 	// Indexer settings
@@ -59,6 +62,9 @@ func GenerateSearchdConfig(cfg *Config) string {
 	sb.WriteString(fmt.Sprintf("index %s {\n", cfg.PlainName))
 	sb.WriteString("    type = plain\n")
 	sb.WriteString(fmt.Sprintf("    path = %s/data/%s\n", cfg.WorkDir, cfg.PlainName))
+	if cfg.CharsetTable != "" {
+		sb.WriteString(fmt.Sprintf("    charset_table = %s\n", cfg.CharsetTable))
+	}
 	sb.WriteString("}\n\n")
 
 	// RT index (target for ATTACH)
@@ -73,6 +79,9 @@ func GenerateSearchdConfig(cfg *Config) string {
 			directive = "rt_field" // default to field
 		}
 		sb.WriteString(fmt.Sprintf("    %s = %s\n", directive, col.Name))
+	}
+	if cfg.CharsetTable != "" {
+		sb.WriteString(fmt.Sprintf("    charset_table = %s\n", cfg.CharsetTable))
 	}
 	sb.WriteString("}\n")
 

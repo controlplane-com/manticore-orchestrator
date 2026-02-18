@@ -574,6 +574,7 @@ type TableConfigResponse struct {
 	AgentRetryCount int                 `json:"agentRetryCount"`
 	MemLimit        string              `json:"memLimit,omitempty"`
 	HasHeader       *bool               `json:"hasHeader,omitempty"`
+	CharsetTable    string              `json:"charsetTable,omitempty"`
 	Columns         []TableConfigColumn `json:"columns,omitempty"`
 }
 

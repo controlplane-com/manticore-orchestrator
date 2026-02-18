@@ -508,11 +508,12 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 
 	// Build index
 	cfg := &indexer.Config{
-		WorkDir:    workDir,
-		TableName:  targetTable,
-		SourcePath: sourcePath,
-		Columns:    columns,
-		MemLimit:   memLimit,
+		WorkDir:      workDir,
+		TableName:    targetTable,
+		SourcePath:   sourcePath,
+		Columns:      columns,
+		MemLimit:     memLimit,
+		CharsetTable: tableConfig.CharsetTable,
 	}
 
 	// Use explicit hasHeader from config if set, otherwise auto-detect

@@ -8,15 +8,16 @@ type Column struct {
 
 // Config holds paths and settings for indexer-based import
 type Config struct {
-	WorkDir     string
-	TableName   string
-	PlainName   string // Plain index name (tableName_plain)
-	SourcePath  string
-	Columns     []Column
-	ImportPort  int
-	ImportMySQL int
-	MemLimit    string
-	HasHeader   bool
+	WorkDir      string
+	TableName    string
+	PlainName    string // Plain index name (tableName_plain)
+	SourcePath   string
+	Columns      []Column
+	ImportPort   int
+	ImportMySQL  int
+	MemLimit     string
+	HasHeader    bool
+	CharsetTable string // Manticore charset_table option (e.g. "non_cont"), empty = use default
 }
 
 // BuildResult contains the output from a successful index build
