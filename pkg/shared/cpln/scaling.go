@@ -38,11 +38,22 @@ func ScaleForOperation(client *Client, gvc, workloadName string) (maxScale int, 
 	cleanup = func() {
 		once.Do(func() {
 			slog.Info("restoring minScale after operation", "workload", workloadName, "minScale", minScale)
-			if err := client.PatchWorkloadMinScale(gvc, workloadName, minScale); err != nil {
-				slog.Error("failed to restore minScale", "error", err, "minScale", minScale)
-			} else {
-				slog.Info("minScale restored successfully", "workload", workloadName, "minScale", minScale)
+			maxAttempts := 10
+			retryInterval := 15 * time.Second
+			for attempt := 1; attempt <= maxAttempts; attempt++ {
+				if err := client.PatchWorkloadMinScale(gvc, workloadName, minScale); err != nil {
+					slog.Error("failed to restore minScale, retrying",
+						"error", err, "attempt", attempt, "maxAttempts", maxAttempts)
+					if attempt < maxAttempts {
+						time.Sleep(retryInterval)
+					}
+				} else {
+					slog.Info("minScale restored successfully", "workload", workloadName, "minScale", minScale)
+					return
+				}
 			}
+			slog.Error("CRITICAL: failed to restore minScale after all attempts — manual intervention required",
+				"workload", workloadName, "minScale", minScale)
 		})
 	}
 

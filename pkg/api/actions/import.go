@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -191,27 +192,12 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
 	// After a replica restart, the table may not exist even if the import reported success
 	// (manticore can crash from I/O pressure right after completing IMPORT TABLE).
-	// If a table is missing on a non-clustered replica, re-run the import on that replica.
+	// If a table is missing, re-run the import on that specific replica.
 	slog.Debug("verifying table exists on all replicas before swap", "table", newMainTable)
 	for i, c := range ctx.Clients {
-		if err := verifyTableExists(goCtx, c, newMainTable, i); err != nil {
-			if !tableConfig.ClusterMain {
-				// Non-clustered: table won't reappear via replication, re-import on this replica
-				slog.Warn("table missing on non-clustered replica, re-importing",
-					"replica", i, "table", newMainTable, "verifyErr", err)
-				if reimportErr := c.ImportWithContext(goCtx, newMainTable, ctx.CSVPath, "", 0, importConfig); reimportErr != nil {
-					cleanup()
-					return fmt.Errorf("re-import on replica %d failed: %w", i, reimportErr)
-				}
-				// Verify again after re-import
-				if err := verifyTableExists(goCtx, c, newMainTable, i); err != nil {
-					cleanup()
-					return fmt.Errorf("table verification failed after re-import on replica %d: %w", i, err)
-				}
-			} else {
-				cleanup()
-				return fmt.Errorf("table verification failed: %w", err)
-			}
+		if err := ensureTableOnReplica(goCtx, c, i, newMainTable, ctx.CSVPath, importConfig); err != nil {
+			cleanup()
+			return fmt.Errorf("table recovery failed before swap: %w", err)
 		}
 	}
 
@@ -231,7 +217,17 @@ func Import(goCtx context.Context, ctx *Context) error {
 
 	for i, c := range ctx.Clients {
 		err := retryWithRecovery(goCtx, fmt.Sprintf("alter distributed on replica %d", i), func() error {
-			return c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+			alterErr := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+			if alterErr != nil && strings.Contains(alterErr.Error(), "no such local table") {
+				slog.Warn("local table missing during ALTER, attempting recovery",
+					"replica", i, "table", newMainTable, "error", alterErr)
+				if recoverErr := ensureTableOnReplica(goCtx, c, i, newMainTable, ctx.CSVPath, importConfig); recoverErr != nil {
+					slog.Error("table recovery failed during ALTER", "replica", i, "error", recoverErr)
+				} else {
+					slog.Info("table recovered, will retry ALTER", "replica", i)
+				}
+			}
+			return alterErr
 		})
 		if err != nil {
 			return fmt.Errorf("failed to alter distributed table on replica %d: %w", i, err)
@@ -320,6 +316,29 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	}
 
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
+}
+
+// ensureTableOnReplica verifies a table exists on a replica, re-importing if needed.
+// If the table is missing (e.g., after a replica restart during scaling), it re-creates
+// and re-imports the table on that specific replica before proceeding.
+func ensureTableOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx int,
+	table, csvPath string, importConfig client.ImportConfig) error {
+
+	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+		slog.Warn("table missing on replica, re-importing",
+			"replica", replicaIdx, "table", table, "verifyErr", err)
+		if createErr := c.CreateTable(table, 0); createErr != nil {
+			slog.Debug("CreateTable before re-import (may already exist)", "error", createErr)
+		}
+		if importErr := c.ImportWithContext(goCtx, table, csvPath, "", 0, importConfig); importErr != nil {
+			return fmt.Errorf("re-import on replica %d failed: %w", replicaIdx, importErr)
+		}
+		if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+			return fmt.Errorf("table still missing after re-import on replica %d: %w", replicaIdx, err)
+		}
+		slog.Info("table recovered on replica", "replica", replicaIdx, "table", table)
+	}
+	return nil
 }
 
 // verifyTableExists checks that a table exists on a specific replica.
