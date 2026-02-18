@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -188,6 +189,18 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
+	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
+	// After a replica restart, the table may not exist even if the import reported success
+	// (manticore can crash from I/O pressure right after completing IMPORT TABLE).
+	// If a table is missing, re-run the import on that specific replica.
+	slog.Debug("verifying table exists on all replicas before swap", "table", newMainTable)
+	for i, c := range ctx.Clients {
+		if err := ensureTableOnReplica(goCtx, c, i, newMainTable, ctx.CSVPath, importConfig); err != nil {
+			cleanup()
+			return fmt.Errorf("table recovery failed before swap: %w", err)
+		}
+	}
+
 	// Step 6: Atomic swap - ALTER distributed table on ALL replicas
 	// This is the critical step - all replicas must point to new table before dropping old
 	locals := []string{newMainTable, deltaTable}
@@ -203,7 +216,20 @@ func Import(goCtx context.Context, ctx *Context) error {
 	}
 
 	for i, c := range ctx.Clients {
-		if err := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 0); err != nil {
+		err := retryWithRecovery(goCtx, fmt.Sprintf("alter distributed on replica %d", i), func() error {
+			alterErr := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+			if alterErr != nil && strings.Contains(alterErr.Error(), "no such local table") {
+				slog.Warn("local table missing during ALTER, attempting recovery",
+					"replica", i, "table", newMainTable, "error", alterErr)
+				if recoverErr := ensureTableOnReplica(goCtx, c, i, newMainTable, ctx.CSVPath, importConfig); recoverErr != nil {
+					slog.Error("table recovery failed during ALTER", "replica", i, "error", recoverErr)
+				} else {
+					slog.Info("table recovered, will retry ALTER", "replica", i)
+				}
+			}
+			return alterErr
+		})
+		if err != nil {
 			return fmt.Errorf("failed to alter distributed table on replica %d: %w", i, err)
 		}
 		slog.Debug("swapped distributed table", "replica", i, "agents", agents)
@@ -212,7 +238,10 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Step 7: Remove old table from cluster (if it was clustered), then drop on ALL replicas
 	if tableConfig.ClusterMain {
 		slog.Debug("removing old main table from cluster", "table", oldMainTable)
-		if err := primary.ClusterDrop(oldMainTable, 0); err != nil {
+		err := retryWithRecovery(goCtx, "cluster drop "+oldMainTable, func() error {
+			return primary.ClusterDrop(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
 		}
 	}
@@ -220,7 +249,10 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Drop the table on each replica
 	slog.Debug("dropping old main table on all replicas", "table", oldMainTable)
 	for i, c := range ctx.Clients {
-		if err := c.DropTable(oldMainTable, 0); err != nil {
+		err := retryWithRecovery(goCtx, fmt.Sprintf("drop table %s on replica %d", oldMainTable, i), func() error {
+			return c.DropTable(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to drop old table", "table", oldMainTable, "replica", i, "error", err)
 		} else {
 			slog.Debug("dropped old table", "table", oldMainTable, "replica", i)
@@ -284,6 +316,125 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	}
 
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
+}
+
+// ensureTableOnReplica verifies a table exists on a replica, re-importing if needed.
+// If the table is missing (e.g., after a replica restart during scaling), it re-creates
+// and re-imports the table on that specific replica before proceeding.
+func ensureTableOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx int,
+	table, csvPath string, importConfig client.ImportConfig) error {
+
+	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+		slog.Warn("table missing on replica, re-importing",
+			"replica", replicaIdx, "table", table, "verifyErr", err)
+		if createErr := c.CreateTable(table, 0); createErr != nil {
+			slog.Debug("CreateTable before re-import (may already exist)", "error", createErr)
+		}
+		if importErr := c.ImportWithContext(goCtx, table, csvPath, "", 0, importConfig); importErr != nil {
+			return fmt.Errorf("re-import on replica %d failed: %w", replicaIdx, importErr)
+		}
+		if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+			return fmt.Errorf("table still missing after re-import on replica %d: %w", replicaIdx, err)
+		}
+		slog.Info("table recovered on replica", "replica", replicaIdx, "table", table)
+	}
+	return nil
+}
+
+// verifyTableExists checks that a table exists on a specific replica.
+// First waits up to 10 minutes for the agent to become reachable (handles rolling restarts),
+// then checks for the table with a shorter timeout.
+func verifyTableExists(goCtx context.Context, c *client.AgentClient, table string, replicaIdx int) error {
+	// Phase 1: Wait for the agent to be reachable (up to 10 minutes).
+	// During a rolling restart the agent returns 503 or is unreachable entirely.
+	// WaitForHealth uses /api/health which bypasses K8s readiness gates.
+	healthTimeout := 10 * time.Minute
+	slog.Debug("waiting for agent health before table verification", "replica", replicaIdx, "timeout", healthTimeout)
+	if err := c.WaitForHealth(goCtx, healthTimeout); err != nil {
+		return fmt.Errorf("replica %d did not become healthy within %v: %w", replicaIdx, healthTimeout, err)
+	}
+
+	// Phase 2: Agent is healthy — verify the table exists.
+	// After a restart with clustered tables, the table should reappear via Galera SST.
+	// Poll for up to 2 minutes to allow replication/SST to complete.
+	maxAttempts := 12 // 12 attempts × 10s = 2 minutes
+	pollInterval := 10 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		select {
+		case <-goCtx.Done():
+			return goCtx.Err()
+		default:
+		}
+
+		tables, err := c.ListTables(1)
+		if err != nil {
+			slog.Warn("table verification: ListTables failed on healthy agent",
+				"replica", replicaIdx, "attempt", attempt, "error", err)
+			if attempt < maxAttempts {
+				select {
+				case <-goCtx.Done():
+					return goCtx.Err()
+				case <-time.After(pollInterval):
+				}
+			}
+			continue
+		}
+
+		for _, t := range tables {
+			if t.Name == table {
+				slog.Debug("table verified on replica", "replica", replicaIdx, "table", table)
+				return nil
+			}
+		}
+
+		slog.Warn("table not found on replica after import",
+			"replica", replicaIdx, "table", table, "attempt", attempt)
+
+		if attempt < maxAttempts {
+			select {
+			case <-goCtx.Done():
+				return goCtx.Err()
+			case <-time.After(pollInterval):
+			}
+		}
+	}
+
+	return fmt.Errorf("table %s not found on replica %d after agent recovered (table may have been lost during restart)", table, replicaIdx)
+}
+
+// retryWithRecovery retries an operation every 30s for up to 5 minutes.
+// This handles the case where a replica is restarting (e.g., from a rollout triggered by scaling)
+// and the operation fails because the agent is temporarily unavailable.
+func retryWithRecovery(ctx context.Context, operation string, fn func() error) error {
+	maxAttempts := 20 // 20 attempts × 30s = 10 minutes
+	retryInterval := 30 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 1 {
+				slog.Info("operation succeeded after retry", "operation", operation, "attempt", attempt)
+			}
+			return nil
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		slog.Warn("operation failed, retrying after wait",
+			"operation", operation, "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
 }
 
 // importWithIndexer builds index locally, uploads to S3 or shared volume, and imports on agents
