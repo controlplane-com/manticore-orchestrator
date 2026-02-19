@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
@@ -12,8 +13,12 @@ import (
 type Context struct {
 	Clients []*client.AgentClient
 	Dataset string // e.g., "addresses"
-	CSVPath string // e.g., "addresses.csv"
+	CSVPath string // e.g., "addresses.csv" — first (or only) CSV path, kept for compat
 	Cluster string // Cluster name for replication
+
+	// Multi-segment support
+	CSVPaths     []string // one CSV path per segment; CSVPath = CSVPaths[0] when set
+	SegmentCount int      // number of segments (1 = single-segment, current behavior)
 
 	// Indexer-related configuration (only used when importMethod is "indexer")
 	S3Client       *s3.Client            // S3 client for uploading indexes (nil for shared volume mode)
@@ -41,6 +46,58 @@ func (c *Context) DeltaTableName() string {
 // DistributedTableName returns the distributed table name
 func (c *Context) DistributedTableName() string {
 	return c.Dataset
+}
+
+// SegmentMainTableName returns the main table name for a given slot and segment number.
+// When SegmentCount <= 1 (single-segment), returns the current naming (no suffix).
+func (c *Context) SegmentMainTableName(slot string, seg int) string {
+	if c.SegmentCount <= 1 {
+		return c.Dataset + "_main_" + slot
+	}
+	return fmt.Sprintf("%s_main_%s_%d", c.Dataset, slot, seg)
+}
+
+// SegmentDeltaTableName returns the delta table name for a given segment number.
+// When SegmentCount <= 1 (single-segment), returns the current naming (no suffix).
+func (c *Context) SegmentDeltaTableName(seg int) string {
+	if c.SegmentCount <= 1 {
+		return c.Dataset + "_delta"
+	}
+	return fmt.Sprintf("%s_delta_%d", c.Dataset, seg)
+}
+
+// AllMainTableNames returns all segment main table names for a given slot.
+func (c *Context) AllMainTableNames(slot string) []string {
+	count := c.SegmentCount
+	if count < 1 {
+		count = 1
+	}
+	names := make([]string, count)
+	for i := range names {
+		names[i] = c.SegmentMainTableName(slot, i+1)
+	}
+	return names
+}
+
+// AllDeltaTableNames returns all segment delta table names.
+func (c *Context) AllDeltaTableNames() []string {
+	count := c.SegmentCount
+	if count < 1 {
+		count = 1
+	}
+	names := make([]string, count)
+	for i := range names {
+		names[i] = c.SegmentDeltaTableName(i+1)
+	}
+	return names
+}
+
+// csvPathForSegment returns the CSV path for a given segment number (1-based).
+func (c *Context) csvPathForSegment(seg int) string {
+	if len(c.CSVPaths) >= seg {
+		return c.CSVPaths[seg-1]
+	}
+	return c.CSVPath // fallback for single-segment or missing paths
 }
 
 // DiscoverTableSlots queries healthy cluster members for existing tables to determine which slot is active per table

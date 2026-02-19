@@ -14,12 +14,43 @@ The Orchestrator uses Manticore's `indexer` tool to quickly ingest data from .ts
 1. While an import runs, the old data remains indexed and accessible. This is key for large imports which often take more than an hour.
 2. Once the import has finished, the Orchestrator transitions between old and new data instantaneously, across all running nodes.
 3. To save space, the old data is deleted in the background.
+
+When `importMethod: indexer` is used, the Orchestrator preprocesses source CSV/TSV files in Go before passing them to the `indexer` tool. This step normalizes delimiters, handles boolean values, skips blank lines, and accommodates very long rows — improving compatibility with a wide range of input formats without relying on external shell utilities.
 ### First-Class Support For the Idiomatic Main+Delta Pattern ###
 Define a table schema using JSON, and instantly get a distributed table that:
 1. Has a "main" child table, intended to be changed only by the import process (although that's up to you).
 2. Has a "delta" child table. The delta table is always part of the Manticore cluster, leveraging Manticore's native replication capability.
 3. Load balances queries between all healthy nodes in the cluster
 4. Optionally, includes the main table in the cluster. This is not recommended, but helps in cases where you need to make changes to the main table between imports.
+
+### Multi-Segment Sharding ###
+For very large datasets that benefit from being split across multiple index shards, the Orchestrator supports a `segmentCount` option. Each segment maintains its own main+delta pair, and the distributed table fans queries out across all of them automatically.
+
+**Configure `segmentCount` in your schema config:**
+```yaml
+addresses:
+  schema:
+    columns: [...]
+  config:
+    segmentCount: 2   # default: 1 (original behavior, no naming change)
+    importMethod: bulk
+```
+
+With `segmentCount: 2`, the Orchestrator manages:
+- `addresses_main_a_1`, `addresses_main_a_2` — active-slot main tables (one per segment)
+- `addresses_delta_1`, `addresses_delta_2` — replicated delta tables (one per segment)
+- `addresses` — distributed table spanning all segments and all replicas
+
+Setting `segmentCount: 1` (the default) preserves the original naming (`addresses_main_a`, `addresses_delta`) with no migration required.
+
+**Multi-segment `TABLES_CONFIG`:**
+
+The `TABLES_CONFIG` environment variable accepts either a single CSV path or an array of paths per table. Both formats are backward-compatible:
+```json
+{"addresses": "addresses.csv"}
+{"addresses": ["addresses_1.csv", "addresses_2.csv"]}
+```
+When an array is provided, each path maps to the corresponding segment (path 1 → segment 1, path 2 → segment 2, etc.).
 ### A Helpful UI ###
 <img width="1908" height="774" alt="image" src="https://github.com/user-attachments/assets/dc2a5514-5d4e-4ec2-a253-d2a72b70ac13" />
 Here you can:
@@ -39,12 +70,21 @@ The Orchestrator provides physical backup and restore for both delta and main ta
 - **Restore**: Download and restore from any backup, including blue-green slot rotation for main tables
 - **Scheduled Backups**: Configure cron schedules per table/type directly on the API server
 - **UI Integration**: Manage backups and restores directly from the Dashboard
+- **Multi-segment aware**: For tables with `segmentCount > 1`, backup creates a single archive containing all segment data. Restore automatically loops over each segment, restoring all from the same archive in sequence.
 
 ## Backup and Restore
 
 The Orchestrator supports physical backup and restore operations for both delta and main tables. Backups are stored as compressed archives in cloud storage (S3 or GCS). Restore operations are supported for both table types, with automatic blue-green slot rotation for main tables.
 
 Backups and restores can be triggered from the Dashboard UI or the API.
+
+### Multi-Segment Backup & Restore
+
+When a table is configured with `segmentCount > 1`, backup and restore operations handle all segments automatically:
+
+- **Backup**: All segment main tables (`addresses_main_b_1`, `addresses_main_b_2`, …) are included in a single `manticore-backup` call and stored in one `.tar.gz` archive. Only the active slot is backed up.
+- **Restore**: The archive is downloaded once. The restore process then iterates over each segment sequentially, calling the agent's `IMPORT TABLE` for each (`addresses_main_a_1`, `addresses_main_a_2`, …). After all segments are restored, the distributed table is rotated to the new slot in a single operation.
+- **Rotation retry**: If the Control Plane API is transiently unavailable during the blue-green slot rotation at the end of a restore, the Orchestrator retries the rotation up to 5 times with increasing backoff (10 s, 20 s, …). If all retries fail, a warning is logged with instructions for manual rotation.
 
 ### Backup Scheduling
 

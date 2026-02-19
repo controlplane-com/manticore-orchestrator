@@ -572,6 +572,7 @@ type TableConfigResponse struct {
 	ClusterMain     bool                `json:"clusterMain"`
 	HAStrategy      string              `json:"haStrategy"`
 	AgentRetryCount int                 `json:"agentRetryCount"`
+	SegmentCount    int                 `json:"segmentCount,omitempty"`
 	MemLimit        string              `json:"memLimit,omitempty"`
 	HasHeader       *bool               `json:"hasHeader,omitempty"`
 	CharsetTable    string              `json:"charsetTable,omitempty"`

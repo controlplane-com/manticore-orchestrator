@@ -243,6 +243,7 @@ func SetInitialized(b bool) {
 // DiscoverSlot determines the active slot for a base table name.
 // Only checks the distributed table to see which main table it references.
 // Returns empty string if slot cannot be determined from distributed table.
+// Supports both single-segment (addresses_main_a) and multi-segment (addresses_main_a_1) naming.
 func (h *Handler) DiscoverSlot(tableName string) string {
 	mainA := tableName + "_main_a"
 	mainB := tableName + "_main_b"
@@ -254,10 +255,11 @@ func (h *Handler) DiscoverSlot(tableName string) string {
 	}
 
 	for _, local := range locals {
-		if local == mainA {
+		// Match exact (single-segment) or prefixed (multi-segment, e.g. _main_a_1)
+		if local == mainA || strings.HasPrefix(local, mainA+"_") {
 			return "a"
 		}
-		if local == mainB {
+		if local == mainB || strings.HasPrefix(local, mainB+"_") {
 			return "b"
 		}
 	}
@@ -772,6 +774,7 @@ type TableConfigResponse struct {
 	ClusterMain     bool               `json:"clusterMain"`
 	HAStrategy      string             `json:"haStrategy"`
 	AgentRetryCount int                `json:"agentRetryCount"`
+	SegmentCount    int                `json:"segmentCount,omitempty"`
 	MemLimit        string             `json:"memLimit,omitempty"`
 	HasHeader       *bool              `json:"hasHeader,omitempty"`
 	CharsetTable    string             `json:"charsetTable,omitempty"`
@@ -803,6 +806,7 @@ func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
 		ClusterMain:     schema.ClusterMain,
 		HAStrategy:      schema.HAStrategy,
 		AgentRetryCount: schema.AgentRetryCount,
+		SegmentCount:    schema.SegmentCount,
 		MemLimit:        schema.MemLimit,
 		HasHeader:       schema.HasHeader,
 		CharsetTable:    schema.CharsetTable,

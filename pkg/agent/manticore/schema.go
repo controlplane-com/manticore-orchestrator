@@ -43,6 +43,7 @@ type Schema struct {
 	ClusterMain     bool   // Whether to add main table to cluster, defaults to true
 	HAStrategy      string // HA strategy for distributed table mirrors, defaults to "nodeads"
 	AgentRetryCount int    // Retry count for failed agents, defaults to 0
+	SegmentCount    int    // Number of segments in the distributed table, defaults to 1
 	MemLimit        string // Indexer memory limit, defaults to "2G"
 	HasHeader       *bool  // Whether source file has a header row, nil = auto-detect
 	CharsetTable    string // Manticore charset_table option (e.g. "non_cont"), empty = use default
@@ -158,6 +159,7 @@ type TableBehaviorConfig struct {
 	ClusterMain     *bool  `yaml:"clusterMain" json:"clusterMain"`         // Use pointer for nil-check (default true)
 	HAStrategy      string `yaml:"haStrategy" json:"haStrategy"`           // "random", "roundrobin", "nodeads" (default), "noerrors"
 	AgentRetryCount *int   `yaml:"agentRetryCount" json:"agentRetryCount"` // Pointer for nil-check (default 0)
+	SegmentCount    int    `yaml:"segmentCount" json:"segmentCount"`       // Number of distributed table segments (default 1)
 	MemLimit        string `yaml:"memLimit" json:"memLimit"`               // Indexer memory limit (default "2G")
 	HasHeader       *bool  `yaml:"hasHeader" json:"hasHeader"`             // Whether source file has a header row (default: auto-detect)
 	CharsetTable    string `yaml:"charsetTable" json:"charsetTable"`       // Manticore charset_table option (e.g. "non_cont")
@@ -218,6 +220,11 @@ func (r *SchemaRegistry) LoadFromFile(path string) error {
 			agentRetryCount = *config.Config.AgentRetryCount
 		}
 
+		segmentCount := 1
+		if config.Config.SegmentCount > 1 {
+			segmentCount = config.Config.SegmentCount
+		}
+
 		r.schemas[tableName] = &Schema{
 			Columns:         config.Schema.Columns,
 			JSONConfig:      string(jsonConfig),
@@ -225,6 +232,7 @@ func (r *SchemaRegistry) LoadFromFile(path string) error {
 			ClusterMain:     clusterMain,
 			HAStrategy:      haStrategy,
 			AgentRetryCount: agentRetryCount,
+			SegmentCount:    segmentCount,
 			MemLimit:        config.Config.MemLimit,
 			HasHeader:       config.Config.HasHeader,
 			CharsetTable:    config.Config.CharsetTable,
@@ -258,10 +266,18 @@ func (r *SchemaRegistry) List() []string {
 }
 
 // ExtractBaseTableName extracts the base table name from derived names
-// e.g., addresses_main_a -> addresses, products_delta -> products
+// e.g., addresses_main_a -> addresses, addresses_main_a_1 -> addresses, products_delta -> products
 func ExtractBaseTableName(tableName string) string {
-	suffixes := []string{"_main_a", "_main_b", "_delta"}
-	for _, suffix := range suffixes {
+	// Try segment-numbered suffixes first: _main_a_N, _main_b_N, _delta_N
+	for _, prefix := range []string{"_main_a_", "_main_b_", "_delta_"} {
+		if idx := strings.LastIndex(tableName, prefix); idx >= 0 {
+			if _, err := strconv.Atoi(tableName[idx+len(prefix):]); err == nil {
+				return tableName[:idx]
+			}
+		}
+	}
+	// Non-numbered suffixes
+	for _, suffix := range []string{"_main_a", "_main_b", "_delta"} {
 		if strings.HasSuffix(tableName, suffix) {
 			return strings.TrimSuffix(tableName, suffix)
 		}

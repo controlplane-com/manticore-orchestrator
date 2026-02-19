@@ -95,8 +95,9 @@ type Server struct {
 
 // TableConfig represents a table configuration entry
 type TableConfig struct {
-	Name    string `json:"name"`
-	CsvPath string `json:"csvPath"`
+	Name     string   `json:"name"`
+	CsvPath  string   `json:"csvPath"`  // first CSV path (backward compat)
+	CsvPaths []string `json:"csvPaths"` // all CSV paths (one per segment)
 }
 
 // QueryRequest represents the request for /api/query
@@ -446,19 +447,7 @@ func (s *Server) hasActiveOp(tableName string) bool {
 
 // getTablesConfig parses the TABLES_CONFIG JSON
 func (s *Server) getTablesConfig() ([]TableConfig, error) {
-	var configMap map[string]string
-	if err := json.Unmarshal([]byte(s.config.TablesConfig), &configMap); err != nil {
-		return nil, fmt.Errorf("failed to parse TABLES_CONFIG: %w", err)
-	}
-
-	var tables []TableConfig
-	for name, csvPath := range configMap {
-		tables = append(tables, TableConfig{Name: name, CsvPath: csvPath})
-	}
-	sort.Slice(tables, func(i, j int) bool {
-		return tables[i].Name < tables[j].Name
-	})
-	return tables, nil
+	return getTablesConfigFromJSON(s.config.TablesConfig)
 }
 
 // requestLogger logs all incoming API requests
@@ -879,7 +868,8 @@ type TableReplicaStatus struct {
 // TableStatusEntry represents the status of a single table across all replicas
 type TableStatusEntry struct {
 	Name        string               `json:"name"`
-	CsvPath     string               `json:"csvPath"`
+	CsvPath     string               `json:"csvPath"`  // first CSV path (backward compat)
+	CsvPaths    []string             `json:"csvPaths"` // all CSV paths (one per segment)
 	ClusterMain bool                 `json:"clusterMain"` // Whether main table should be in cluster
 	Replicas    []TableReplicaStatus `json:"replicas"`
 }
@@ -963,13 +953,18 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 	for _, tableConfig := range tablesConfig {
 		// Default clusterMain to true if we couldn't fetch config
 		clusterMain := true
+		segmentCount := 1
 		if cfg, ok := tableConfigs[tableConfig.Name]; ok {
 			clusterMain = cfg.ClusterMain
+			if cfg.SegmentCount > 1 {
+				segmentCount = cfg.SegmentCount
+			}
 		}
 
 		entry := TableStatusEntry{
 			Name:        tableConfig.Name,
 			CsvPath:     tableConfig.CsvPath,
+			CsvPaths:    tableConfig.CsvPaths,
 			ClusterMain: clusterMain,
 			Replicas:    make([]TableReplicaStatus, replicaCount),
 		}
@@ -979,8 +974,18 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 		if activeSlot == "" {
 			activeSlot = "a"
 		}
-		mainTableName := fmt.Sprintf("%s_main_%s", tableConfig.Name, activeSlot)
-		deltaTableName := fmt.Sprintf("%s_delta", tableConfig.Name)
+		// Build segment-aware table name sets for matching
+		mainTableSet := make(map[string]bool)
+		deltaTableSet := make(map[string]bool)
+		for seg := 1; seg <= segmentCount; seg++ {
+			if segmentCount == 1 {
+				mainTableSet[tableConfig.Name+"_main_"+activeSlot] = true
+				deltaTableSet[tableConfig.Name+"_delta"] = true
+			} else {
+				mainTableSet[fmt.Sprintf("%s_main_%s_%d", tableConfig.Name, activeSlot, seg)] = true
+				deltaTableSet[fmt.Sprintf("%s_delta_%d", tableConfig.Name, seg)] = true
+			}
+		}
 		distributedTableName := tableConfig.Name
 
 		for idx := 0; idx < replicaCount; idx++ {
@@ -996,16 +1001,14 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 			} else if tables, ok := replicaTableMap[idx]; ok {
 				// Check for each table component
 				for _, t := range tables {
-					switch t.Name {
-					case mainTableName:
+					if mainTableSet[t.Name] {
 						replicaStatus.MainTable.Present = true
 						replicaStatus.MainTable.InCluster = t.InCluster
-					case deltaTableName:
+					} else if deltaTableSet[t.Name] {
 						replicaStatus.DeltaTable.Present = true
 						replicaStatus.DeltaTable.InCluster = t.InCluster
-					case distributedTableName:
+					} else if t.Name == distributedTableName {
 						replicaStatus.DistributedTable.Present = true
-						// Distributed tables are not in the cluster
 					}
 				}
 			}
@@ -2498,17 +2501,19 @@ func runCLI(config Config) {
 
 	// TABLE_NAME is only required for import action
 	var csvPath string
+	var csvPaths []string
 	if action == "import" {
 		if tableName == "" {
 			slog.Error("TABLE_NAME environment variable is required for import action")
 			os.Exit(1)
 		}
 		var err error
-		csvPath, err = getCSVPathForTable(config.TablesConfig, tableName)
+		csvPaths, err = getCSVPathsForTable(config.TablesConfig, tableName)
 		if err != nil {
-			slog.Error("failed to get CSV path", "table", tableName, "error", err)
+			slog.Error("failed to get CSV paths", "table", tableName, "error", err)
 			os.Exit(1)
 		}
+		csvPath = csvPaths[0]
 	}
 
 	slog.Info("Manticore Orchestrator starting (CLI mode)", "action", action, "replicas", replicaCount, "workload", config.WorkloadName)
@@ -2543,6 +2548,7 @@ func runCLI(config Config) {
 		Clients:           clients,
 		Dataset:           tableName,
 		CSVPath:           csvPath,
+		CSVPaths:          csvPaths,
 		S3Client:          s3Client,
 		IndexerBuilder:    indexerBuilder,
 		S3IndexPrefix:     config.S3IndexPrefix,
@@ -2826,13 +2832,18 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 	for _, tableConfig := range tablesConfig {
 		// Default clusterMain to true if we couldn't fetch config
 		clusterMain := true
+		segmentCount := 1
 		if cfg, ok := tableConfigs[tableConfig.Name]; ok {
 			clusterMain = cfg.ClusterMain
+			if cfg.SegmentCount > 1 {
+				segmentCount = cfg.SegmentCount
+			}
 		}
 
 		entry := TableStatusEntry{
 			Name:        tableConfig.Name,
 			CsvPath:     tableConfig.CsvPath,
+			CsvPaths:    tableConfig.CsvPaths,
 			ClusterMain: clusterMain,
 			Replicas:    make([]TableReplicaStatus, len(clients)),
 		}
@@ -2842,8 +2853,18 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 		if activeSlot == "" {
 			activeSlot = "a"
 		}
-		mainTableName := fmt.Sprintf("%s_main_%s", tableConfig.Name, activeSlot)
-		deltaTableName := fmt.Sprintf("%s_delta", tableConfig.Name)
+		// Build segment-aware table name sets for matching
+		mainTableSet := make(map[string]bool)
+		deltaTableSet := make(map[string]bool)
+		for seg := 1; seg <= segmentCount; seg++ {
+			if segmentCount == 1 {
+				mainTableSet[tableConfig.Name+"_main_"+activeSlot] = true
+				deltaTableSet[tableConfig.Name+"_delta"] = true
+			} else {
+				mainTableSet[fmt.Sprintf("%s_main_%s_%d", tableConfig.Name, activeSlot, seg)] = true
+				deltaTableSet[fmt.Sprintf("%s_delta_%d", tableConfig.Name, seg)] = true
+			}
+		}
 		distributedTableName := tableConfig.Name
 
 		for idx := 0; idx < len(clients); idx++ {
@@ -2858,14 +2879,13 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 				replicaStatus.Error = &errStr
 			} else if tables, ok := replicaTableMap[idx]; ok {
 				for _, t := range tables {
-					switch t.Name {
-					case mainTableName:
+					if mainTableSet[t.Name] {
 						replicaStatus.MainTable.Present = true
 						replicaStatus.MainTable.InCluster = t.InCluster
-					case deltaTableName:
+					} else if deltaTableSet[t.Name] {
 						replicaStatus.DeltaTable.Present = true
 						replicaStatus.DeltaTable.InCluster = t.InCluster
-					case distributedTableName:
+					} else if t.Name == distributedTableName {
 						replicaStatus.DistributedTable.Present = true
 					}
 				}
@@ -2927,30 +2947,62 @@ func getEnvInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
-func getCSVPathForTable(tablesConfigJSON, tableName string) (string, error) {
-	var config map[string]string
-	if err := json.Unmarshal([]byte(tablesConfigJSON), &config); err != nil {
-		return "", fmt.Errorf("failed to parse TABLES_CONFIG: %w", err)
+// parseCSVPaths parses a raw JSON value as either a string or []string, returning []string.
+func parseCSVPaths(raw json.RawMessage) ([]string, error) {
+	// Try array first
+	var paths []string
+	if err := json.Unmarshal(raw, &paths); err == nil {
+		if len(paths) == 0 {
+			return nil, fmt.Errorf("empty path array")
+		}
+		return paths, nil
 	}
-
-	csvPath, ok := config[tableName]
-	if !ok {
-		return "", fmt.Errorf("table %s not found in TABLES_CONFIG", tableName)
+	// Fall back to single string
+	var single string
+	if err := json.Unmarshal(raw, &single); err != nil {
+		return nil, fmt.Errorf("must be a string or []string")
 	}
-
-	return csvPath, nil
+	return []string{single}, nil
 }
 
-// getTablesConfigFromJSON parses TABLES_CONFIG JSON and returns all table configs
+func getCSVPathForTable(tablesConfigJSON, tableName string) (string, error) {
+	paths, err := getCSVPathsForTable(tablesConfigJSON, tableName)
+	if err != nil {
+		return "", err
+	}
+	return paths[0], nil
+}
+
+// getCSVPathsForTable returns all CSV paths for the named table (supports string or []string values).
+func getCSVPathsForTable(tablesConfigJSON, tableName string) ([]string, error) {
+	var configMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(tablesConfigJSON), &configMap); err != nil {
+		return nil, fmt.Errorf("failed to parse TABLES_CONFIG: %w", err)
+	}
+
+	raw, ok := configMap[tableName]
+	if !ok {
+		return nil, fmt.Errorf("table %s not found in TABLES_CONFIG", tableName)
+	}
+
+	return parseCSVPaths(raw)
+}
+
+// getTablesConfigFromJSON parses TABLES_CONFIG JSON and returns all table configs.
+// Supports both string values ({"table": "path"}) and array values ({"table": ["p1","p2"]}).
 func getTablesConfigFromJSON(tablesConfigJSON string) ([]TableConfig, error) {
-	var configMap map[string]string
+	var configMap map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(tablesConfigJSON), &configMap); err != nil {
 		return nil, fmt.Errorf("failed to parse TABLES_CONFIG: %w", err)
 	}
 
 	var tables []TableConfig
-	for name, csvPath := range configMap {
-		tables = append(tables, TableConfig{Name: name, CsvPath: csvPath})
+	for name, raw := range configMap {
+		paths, err := parseCSVPaths(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path for table %s: %w", name, err)
+		}
+		tables = append(tables, TableConfig{Name: name, CsvPath: paths[0], CsvPaths: paths})
 	}
 	sort.Slice(tables, func(i, j int) bool {
 		return tables[i].Name < tables[j].Name

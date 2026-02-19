@@ -27,13 +27,13 @@ func GenerateIndexerConfig(cfg *Config) string {
 	sb.WriteString("}\n\n")
 
 	// Plain index definition
+	// Note: charset_table is intentionally omitted — SQL keyword aliases like "non_cont"
+	// are not valid in the sphinx-style indexer config format. The production RT table's
+	// charset is set via CREATE TABLE SQL, not here.
 	sb.WriteString(fmt.Sprintf("index %s {\n", cfg.PlainName))
 	sb.WriteString("    type = plain\n")
 	sb.WriteString(fmt.Sprintf("    source = %s_source\n", cfg.PlainName))
 	sb.WriteString(fmt.Sprintf("    path = %s/data/%s\n", cfg.WorkDir, cfg.PlainName))
-	if cfg.CharsetTable != "" {
-		sb.WriteString(fmt.Sprintf("    charset_table = %s\n", cfg.CharsetTable))
-	}
 	sb.WriteString("}\n\n")
 
 	// Indexer settings
@@ -58,16 +58,14 @@ func GenerateSearchdConfig(cfg *Config) string {
 	sb.WriteString(fmt.Sprintf("    binlog_path = %s/binlog\n", cfg.WorkDir))
 	sb.WriteString("}\n\n")
 
-	// Plain index (for ATTACH source)
+	// Plain index (for ATTACH source) — no charset_table, must match RT below
 	sb.WriteString(fmt.Sprintf("index %s {\n", cfg.PlainName))
 	sb.WriteString("    type = plain\n")
 	sb.WriteString(fmt.Sprintf("    path = %s/data/%s\n", cfg.WorkDir, cfg.PlainName))
-	if cfg.CharsetTable != "" {
-		sb.WriteString(fmt.Sprintf("    charset_table = %s\n", cfg.CharsetTable))
-	}
 	sb.WriteString("}\n\n")
 
-	// RT index (target for ATTACH)
+	// RT index (target for ATTACH) — no charset_table so it matches the plain index above,
+	// allowing ATTACH to succeed. The production RT's charset is set via CREATE TABLE SQL.
 	sb.WriteString(fmt.Sprintf("index %s {\n", cfg.TableName))
 	sb.WriteString("    type = rt\n")
 	sb.WriteString(fmt.Sprintf("    path = %s/data/%s\n", cfg.WorkDir, cfg.TableName))
@@ -79,9 +77,6 @@ func GenerateSearchdConfig(cfg *Config) string {
 			directive = "rt_field" // default to field
 		}
 		sb.WriteString(fmt.Sprintf("    %s = %s\n", directive, col.Name))
-	}
-	if cfg.CharsetTable != "" {
-		sb.WriteString(fmt.Sprintf("    charset_table = %s\n", cfg.CharsetTable))
 	}
 	sb.WriteString("}\n")
 
