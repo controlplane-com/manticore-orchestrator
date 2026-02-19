@@ -447,19 +447,7 @@ func (s *Server) hasActiveOp(tableName string) bool {
 
 // getTablesConfig parses the TABLES_CONFIG JSON
 func (s *Server) getTablesConfig() ([]TableConfig, error) {
-	var configMap map[string]string
-	if err := json.Unmarshal([]byte(s.config.TablesConfig), &configMap); err != nil {
-		return nil, fmt.Errorf("failed to parse TABLES_CONFIG: %w", err)
-	}
-
-	var tables []TableConfig
-	for name, csvPath := range configMap {
-		tables = append(tables, TableConfig{Name: name, CsvPath: csvPath})
-	}
-	sort.Slice(tables, func(i, j int) bool {
-		return tables[i].Name < tables[j].Name
-	})
-	return tables, nil
+	return getTablesConfigFromJSON(s.config.TablesConfig)
 }
 
 // requestLogger logs all incoming API requests
@@ -965,8 +953,12 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 	for _, tableConfig := range tablesConfig {
 		// Default clusterMain to true if we couldn't fetch config
 		clusterMain := true
+		segmentCount := 1
 		if cfg, ok := tableConfigs[tableConfig.Name]; ok {
 			clusterMain = cfg.ClusterMain
+			if cfg.SegmentCount > 1 {
+				segmentCount = cfg.SegmentCount
+			}
 		}
 
 		entry := TableStatusEntry{
@@ -982,8 +974,18 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 		if activeSlot == "" {
 			activeSlot = "a"
 		}
-		mainTableName := fmt.Sprintf("%s_main_%s", tableConfig.Name, activeSlot)
-		deltaTableName := fmt.Sprintf("%s_delta", tableConfig.Name)
+		// Build segment-aware table name sets for matching
+		mainTableSet := make(map[string]bool)
+		deltaTableSet := make(map[string]bool)
+		for seg := 1; seg <= segmentCount; seg++ {
+			if segmentCount == 1 {
+				mainTableSet[tableConfig.Name+"_main_"+activeSlot] = true
+				deltaTableSet[tableConfig.Name+"_delta"] = true
+			} else {
+				mainTableSet[fmt.Sprintf("%s_main_%s_%d", tableConfig.Name, activeSlot, seg)] = true
+				deltaTableSet[fmt.Sprintf("%s_delta_%d", tableConfig.Name, seg)] = true
+			}
+		}
 		distributedTableName := tableConfig.Name
 
 		for idx := 0; idx < replicaCount; idx++ {
@@ -999,16 +1001,14 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 			} else if tables, ok := replicaTableMap[idx]; ok {
 				// Check for each table component
 				for _, t := range tables {
-					switch t.Name {
-					case mainTableName:
+					if mainTableSet[t.Name] {
 						replicaStatus.MainTable.Present = true
 						replicaStatus.MainTable.InCluster = t.InCluster
-					case deltaTableName:
+					} else if deltaTableSet[t.Name] {
 						replicaStatus.DeltaTable.Present = true
 						replicaStatus.DeltaTable.InCluster = t.InCluster
-					case distributedTableName:
+					} else if t.Name == distributedTableName {
 						replicaStatus.DistributedTable.Present = true
-						// Distributed tables are not in the cluster
 					}
 				}
 			}
@@ -2832,8 +2832,12 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 	for _, tableConfig := range tablesConfig {
 		// Default clusterMain to true if we couldn't fetch config
 		clusterMain := true
+		segmentCount := 1
 		if cfg, ok := tableConfigs[tableConfig.Name]; ok {
 			clusterMain = cfg.ClusterMain
+			if cfg.SegmentCount > 1 {
+				segmentCount = cfg.SegmentCount
+			}
 		}
 
 		entry := TableStatusEntry{
@@ -2849,8 +2853,18 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 		if activeSlot == "" {
 			activeSlot = "a"
 		}
-		mainTableName := fmt.Sprintf("%s_main_%s", tableConfig.Name, activeSlot)
-		deltaTableName := fmt.Sprintf("%s_delta", tableConfig.Name)
+		// Build segment-aware table name sets for matching
+		mainTableSet := make(map[string]bool)
+		deltaTableSet := make(map[string]bool)
+		for seg := 1; seg <= segmentCount; seg++ {
+			if segmentCount == 1 {
+				mainTableSet[tableConfig.Name+"_main_"+activeSlot] = true
+				deltaTableSet[tableConfig.Name+"_delta"] = true
+			} else {
+				mainTableSet[fmt.Sprintf("%s_main_%s_%d", tableConfig.Name, activeSlot, seg)] = true
+				deltaTableSet[fmt.Sprintf("%s_delta_%d", tableConfig.Name, seg)] = true
+			}
+		}
 		distributedTableName := tableConfig.Name
 
 		for idx := 0; idx < len(clients); idx++ {
@@ -2865,14 +2879,13 @@ func runCLITablesStatus(config Config, clients []*client.AgentClient) error {
 				replicaStatus.Error = &errStr
 			} else if tables, ok := replicaTableMap[idx]; ok {
 				for _, t := range tables {
-					switch t.Name {
-					case mainTableName:
+					if mainTableSet[t.Name] {
 						replicaStatus.MainTable.Present = true
 						replicaStatus.MainTable.InCluster = t.InCluster
-					case deltaTableName:
+					} else if deltaTableSet[t.Name] {
 						replicaStatus.DeltaTable.Present = true
 						replicaStatus.DeltaTable.InCluster = t.InCluster
-					case distributedTableName:
+					} else if t.Name == distributedTableName {
 						replicaStatus.DistributedTable.Present = true
 					}
 				}

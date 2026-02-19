@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
@@ -144,9 +145,20 @@ func runBackup(cfg Config) error {
 	agentURL := fmt.Sprintf("http://%s:%s", cfg.ManticoreHost, cfg.AgentPort)
 	agentClient := client.NewAgentClient(agentURL, cfg.AuthToken)
 
+	// Resolve segment-aware table names for multi-segment configurations
+	backupTable := cfg.TableName
+	if agentCfg, err := agentClient.GetTableConfig(cfg.Dataset, 1); err == nil && agentCfg.SegmentCount > 1 {
+		var names []string
+		for seg := 1; seg <= agentCfg.SegmentCount; seg++ {
+			names = append(names, fmt.Sprintf("%s_%d", cfg.TableName, seg))
+		}
+		backupTable = strings.Join(names, ",")
+		slog.Info("multi-segment backup", "tables", backupTable)
+	}
+
 	slog.Info("requesting agent to run manticore-backup")
 	jobID, err := agentClient.StartBackup(types.BackupRequest{
-		Table:     cfg.TableName,
+		Table:     backupTable,
 		BackupDir: backupDir,
 	}, 0)
 	if err != nil {
@@ -246,44 +258,75 @@ func runRestore(cfg Config) error {
 	agentURL := fmt.Sprintf("http://%s:%s", cfg.ManticoreHost, cfg.AgentPort)
 	agentClient := client.NewAgentClient(agentURL, cfg.AuthToken)
 
-	restoreReq := types.RestoreRequest{
-		Table:     cfg.TableName,
-		BackupDir: restoreDir,
-	}
-	if sourceTable != "" {
-		restoreReq.SourceTable = sourceTable
+	// Resolve segment count — multi-segment tables need one restore per segment
+	segmentCount := 1
+	if agentCfg, err := agentClient.GetTableConfig(cfg.Dataset, 1); err == nil && agentCfg.SegmentCount > 1 {
+		segmentCount = agentCfg.SegmentCount
+		slog.Info("multi-segment restore", "segmentCount", segmentCount)
 	}
 
-	slog.Info("requesting agent to restore from backup")
-	jobID, err := agentClient.StartRestore(restoreReq, 0)
-	if err != nil {
-		slog.Warn("StartRestore failed, waiting for agent recovery before retrying",
-			"error", err, "baseURL", agentClient.BaseURL())
-
-		if healthErr := agentClient.WaitForHealth(context.Background(), client.StartRetryRecoveryTimeout); healthErr != nil {
-			return fmt.Errorf("failed to start restore on agent (agent did not recover): %w", err)
+	// Step 3: Restore each segment sequentially from the single backup archive
+	for seg := 1; seg <= segmentCount; seg++ {
+		targetTable := cfg.TableName
+		segSourceTable := sourceTable
+		if segmentCount > 1 {
+			targetTable = fmt.Sprintf("%s_%d", cfg.TableName, seg)
+			if sourceTable != "" {
+				segSourceTable = fmt.Sprintf("%s_%d", sourceTable, seg)
+			}
 		}
 
-		jobID, err = agentClient.StartRestore(restoreReq, 0)
+		restoreReq := types.RestoreRequest{
+			Table:     targetTable,
+			BackupDir: restoreDir,
+		}
+		if segSourceTable != "" {
+			restoreReq.SourceTable = segSourceTable
+		}
+
+		slog.Info("requesting agent to restore segment", "seg", seg, "of", segmentCount, "target", targetTable, "source", segSourceTable)
+		jobID, err := agentClient.StartRestore(restoreReq, 0)
 		if err != nil {
-			return fmt.Errorf("failed to start restore after agent recovery: %w", err)
-		}
-		slog.Info("StartRestore succeeded after agent recovery", "baseURL", agentClient.BaseURL())
-	}
-	slog.Info("restore job started", "jobId", jobID)
+			slog.Warn("StartRestore failed, waiting for agent recovery before retrying",
+				"error", err, "baseURL", agentClient.BaseURL())
 
-	// Step 3: Poll until restore completes (initial delay to let job start)
-	time.Sleep(15 * time.Second)
-	if err := pollAgentJob(agentClient, "restore", jobID, &restoreReq); err != nil {
-		return fmt.Errorf("restore job failed: %w", err)
+			if healthErr := agentClient.WaitForHealth(context.Background(), client.StartRetryRecoveryTimeout); healthErr != nil {
+				return fmt.Errorf("failed to start restore on agent (agent did not recover): %w", err)
+			}
+
+			jobID, err = agentClient.StartRestore(restoreReq, 0)
+			if err != nil {
+				return fmt.Errorf("failed to start restore after agent recovery: %w", err)
+			}
+			slog.Info("StartRestore succeeded after agent recovery", "baseURL", agentClient.BaseURL())
+		}
+		slog.Info("restore job started", "jobId", jobID, "seg", seg)
+
+		// Poll until this segment restore completes (initial delay to let job start)
+		time.Sleep(15 * time.Second)
+		if err := pollAgentJob(agentClient, "restore", jobID, &restoreReq); err != nil {
+			return fmt.Errorf("restore segment %d failed: %w", seg, err)
+		}
 	}
 
 	// Step 4: Blue-green rotation (main tables only)
+	// Retry on transient errors (e.g. CPLN API 503 during replica count lookup)
 	if sourceTable != "" && cfg.OrchestratorURL != "" {
-		if err := rotateMain(cfg); err != nil {
+		const maxRotateAttempts = 5
+		var rotateErr error
+		for attempt := 1; attempt <= maxRotateAttempts; attempt++ {
+			rotateErr = rotateMain(cfg)
+			if rotateErr == nil {
+				break
+			}
+			slog.Warn("rotation attempt failed, retrying",
+				"attempt", attempt, "maxAttempts", maxRotateAttempts, "error", rotateErr)
+			time.Sleep(time.Duration(attempt*10) * time.Second)
+		}
+		if rotateErr != nil {
 			slog.Error("rotation failed - restore data is in target table but distributed table has NOT been rotated",
 				"targetTable", cfg.TableName,
-				"error", err,
+				"error", rotateErr,
 			)
 			slog.Warn("manual rotation required",
 				"url", cfg.OrchestratorURL+"/api/rotate-main",
@@ -291,7 +334,7 @@ func runRestore(cfg Config) error {
 				"newSlot", cfg.Slot,
 				"oldSlot", cfg.BackupSlot,
 			)
-			return fmt.Errorf("rotation failed: %w", err)
+			return fmt.Errorf("rotation failed: %w", rotateErr)
 		}
 	}
 
