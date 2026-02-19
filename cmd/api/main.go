@@ -20,7 +20,7 @@ import (
 	actions2 "github.com/controlplane-com/manticore-orchestrator/pkg/api/actions"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
-	"github.com/controlplane-com/manticore-orchestrator/pkg/s3"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/s3"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cluster"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/cpln"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
@@ -74,12 +74,23 @@ type Config struct {
 }
 
 // Server is the orchestrator REST API server
+// ActiveOperation tracks an in-progress operation (import/restore) for UI visibility
+type ActiveOperation struct {
+	TableName string    `json:"tableName"`
+	Action    string    `json:"action"`    // "import" or "restore"
+	Phase     string    `json:"phase"`     // "starting"
+	StartedAt time.Time `json:"startedAt"`
+	Error     string    `json:"error,omitempty"`
+}
+
 type Server struct {
 	config        Config
 	cplnClient    *cpln.Client
 	backupClient  *s3.Client // S3 client for backup operations (also works for S3-compatible storage)
 	mu            sync.RWMutex
 	cronScheduler *cron.Cron // Background backup scheduler (nil if no schedules configured)
+	activeOps     map[string]*ActiveOperation // keyed by tableName
+	activeOpsMu   sync.RWMutex
 }
 
 // TableConfig represents a table configuration entry
@@ -229,6 +240,7 @@ func runServer(config Config) {
 		config:       config,
 		cplnClient:   cplnClient,
 		backupClient: backupClient,
+		activeOps:    make(map[string]*ActiveOperation),
 	}
 
 	// Start background repair loop
@@ -259,7 +271,8 @@ func runServer(config Config) {
 	mux := http.NewServeMux()
 
 	// Apply auth middleware to all endpoints
-	authMux := authMiddleware(config.AuthToken, mux)
+	loggedMux := requestLogger(mux)
+	authMux := authMiddleware(config.AuthToken, loggedMux)
 
 	// Health endpoint (legacy - simple health check)
 	mux.HandleFunc("/api/health", server.handleHealth)
@@ -392,6 +405,46 @@ func (s *Server) buildClients(replicaCount int) []*client.AgentClient {
 	return clients
 }
 
+
+
+// setActiveOp records an active operation for UI visibility
+func (s *Server) setActiveOp(tableName, action, phase string) {
+	s.activeOpsMu.Lock()
+	defer s.activeOpsMu.Unlock()
+	s.activeOps[tableName] = &ActiveOperation{
+		TableName: tableName,
+		Action:    action,
+		Phase:     phase,
+		StartedAt: time.Now(),
+	}
+}
+
+// clearActiveOp removes an active operation (e.g., when the CPLN command takes over tracking)
+func (s *Server) clearActiveOp(tableName string) {
+	s.activeOpsMu.Lock()
+	defer s.activeOpsMu.Unlock()
+	delete(s.activeOps, tableName)
+}
+
+// getActiveOps returns a snapshot of all active operations
+func (s *Server) getActiveOps() []*ActiveOperation {
+	s.activeOpsMu.RLock()
+	defer s.activeOpsMu.RUnlock()
+	ops := make([]*ActiveOperation, 0, len(s.activeOps))
+	for _, op := range s.activeOps {
+		ops = append(ops, op)
+	}
+	return ops
+}
+
+// hasActiveOp checks if there's an active operation for a table
+func (s *Server) hasActiveOp(tableName string) bool {
+	s.activeOpsMu.RLock()
+	defer s.activeOpsMu.RUnlock()
+	_, exists := s.activeOps[tableName]
+	return exists
+}
+
 // getTablesConfig parses the TABLES_CONFIG JSON
 func (s *Server) getTablesConfig() ([]TableConfig, error) {
 	var configMap map[string]string
@@ -407,6 +460,14 @@ func (s *Server) getTablesConfig() ([]TableConfig, error) {
 		return tables[i].Name < tables[j].Name
 	})
 	return tables, nil
+}
+
+// requestLogger logs all incoming API requests
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("incoming request", "method", r.Method, "path", r.URL.Path, "remoteAddr", r.RemoteAddr)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // authMiddleware validates bearer token
@@ -1107,8 +1168,10 @@ func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build env overrides
-	envVars := []cpln.EnvVar{{Name: "ACTION", Value: "repair"}}
+	// Build env overrides (cron uses its own platform-injected CPLN_TOKEN for scaling)
+	envVars := []cpln.EnvVar{
+		{Name: "ACTION", Value: "repair"},
+	}
 	if req.SourceReplica != nil {
 		envVars = append(envVars, cpln.EnvVar{
 			Name:  "REPAIR_SOURCE_REPLICA",
@@ -1372,6 +1435,28 @@ func (s *Server) handleImports(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Include operations still in scaling/starting phase (not yet visible as CPLN commands)
+	for _, op := range s.getActiveOps() {
+		if op.Action != "import" {
+			continue
+		}
+		// If CPLN command already exists for this table, clear the local tracking
+		alreadyTracked := false
+		for _, imp := range imports {
+			if imp.TableName == op.TableName {
+				alreadyTracked = true
+				s.clearActiveOp(op.TableName) // CPLN has taken over
+				break
+			}
+		}
+		if !alreadyTracked {
+			imports = append(imports, ImportStatus{
+				TableName:      op.TableName,
+				LifecycleStage: op.Phase,
+			})
+		}
+	}
+
 	response := ImportsResponse{
 		Imports: imports,
 	}
@@ -1478,6 +1563,7 @@ type CommandHistoryEntry struct {
 	Action         string `json:"action"`                  // "import", "repair", "backup", or "restore"
 	TableName      string `json:"tableName,omitempty"`     // for imports, backups, and restores
 	Type           string `json:"type,omitempty"`          // "delta" or "main" for backups and restores
+	Filename       string `json:"filename,omitempty"`      // restore filename for retry
 	SourceReplica  *int   `json:"sourceReplica,omitempty"` // only for repairs
 	LifecycleStage string `json:"lifecycleStage"`
 	Created        string `json:"created"` // ISO timestamp for sorting
@@ -1553,14 +1639,18 @@ func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				backupType := extractTypeFromCommand(cmd)
-				history = append(history, CommandHistoryEntry{
+				entry := CommandHistoryEntry{
 					ID:             cmd.ID,
 					Action:         action,
 					TableName:      dataset,
 					Type:           backupType,
 					LifecycleStage: cmd.LifecycleStage,
 					Created:        cmd.Created,
-				})
+				}
+				if action == "restore" {
+					entry.Filename = extractEnvFromCommand(cmd, "RESTORE_FILE")
+				}
+				history = append(history, entry)
 			}
 		}
 	}
@@ -1619,6 +1709,13 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Check for in-progress imports or repairs (pending or running) in a single query
+	// Also check activeOps for operations still in scaling phase
+	if s.hasActiveOp(req.TableName) {
+		jsonError(w, http.StatusConflict,
+			fmt.Sprintf("operation already in progress for table %s (scaling)", req.TableName))
+		return
+	}
+
 	commands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, orchestratorWorkload, 0)
 	if err != nil {
 		slog.Warn("failed to query active commands", "error", err)
@@ -1646,33 +1743,55 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Start the cron workload with table-specific overrides
-	overrides := []cpln.ContainerOverride{
-		{
-			Name: "orchestrator",
-			Env: []cpln.EnvVar{
-				{Name: "ACTION", Value: "import"},
-				{Name: "TABLE_NAME", Value: req.TableName},
-				{Name: "IMPORT_POLL_INTERVAL", Value: os.Getenv("IMPORT_POLL_INTERVAL")},
-				{Name: "IMPORT_POLL_TIMEOUT", Value: os.Getenv("IMPORT_POLL_TIMEOUT")},
-			},
-		},
-	}
-
-	slog.Info("triggering import via cron workload", "table", req.TableName, "workload", orchestratorWorkload)
-	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, orchestratorWorkload, s.config.Location, overrides)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start import: %v", err))
-		return
-	}
+	// Track the operation for UI visibility and return immediately
+	s.setActiveOp(req.TableName, "import", "starting")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "accepted",
-		"message":   fmt.Sprintf("import started for table %s", req.TableName),
-		"commandId": cmd.ID,
+		"status":  "accepted",
+		"message": fmt.Sprintf("import starting for table %s", req.TableName),
 	})
+
+	// Start cron in background (scaling is handled by the cron job itself)
+	go func() {
+		tableName := req.TableName
+
+		// Start the cron workload with table-specific overrides
+		// Cron uses its own platform-injected CPLN_TOKEN for scaling
+		overrides := []cpln.ContainerOverride{
+			{
+				Name: "orchestrator",
+				Env: []cpln.EnvVar{
+					{Name: "ACTION", Value: "import"},
+					{Name: "TABLE_NAME", Value: tableName},
+					{Name: "IMPORT_POLL_INTERVAL", Value: os.Getenv("IMPORT_POLL_INTERVAL")},
+					{Name: "IMPORT_POLL_TIMEOUT", Value: os.Getenv("IMPORT_POLL_TIMEOUT")},
+				},
+			},
+		}
+
+		slog.Info("triggering import via cron workload", "table", tableName, "workload", orchestratorWorkload)
+		cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, orchestratorWorkload, s.config.Location, overrides)
+		if err != nil {
+			slog.Error("failed to start import cron workload", "table", tableName, "error", err)
+			s.clearActiveOp(tableName)
+			return
+		}
+
+		// Update phase — keep tracking until CPLN command is visible in query results.
+		// The handleImports endpoint deduplicates by table name, so once the CPLN command
+		// appears in QueryActiveCommands, the activeOp is ignored. We clear it after a
+		// short delay to give CPLN time to propagate.
+		s.setActiveOp(tableName, "import", "starting")
+		slog.Info("import cron workload started", "table", tableName, "commandId", cmd.ID)
+
+		// Give CPLN time to propagate the command, then clean up local tracking
+		go func() {
+			time.Sleep(30 * time.Second)
+			s.clearActiveOp(tableName)
+		}()
+	}()
 }
 
 // triggerBackup validates and triggers a backup cron workload for the given table and type.
@@ -1752,7 +1871,7 @@ func (s *Server) triggerBackup(tableName, backupType string) (string, error) {
 		slog.Info("discovered active slot for main backup", "table", tableName, "slot", slot)
 	}
 
-	// Start the backup cron workload with overrides
+	// Start the backup cron workload with overrides (no scaling needed for backups — single replica only)
 	overrides := []cpln.ContainerOverride{
 		{
 			Name: s.config.BackupContainer,
@@ -1820,6 +1939,7 @@ type BackupStatus struct {
 	TableName      string `json:"tableName"`
 	CommandID      string `json:"commandId"`
 	LifecycleStage string `json:"lifecycleStage"`
+	Action         string `json:"action"` // "backup" or "restore"
 }
 
 // BackupsResponse represents the response for /api/backups
@@ -1862,6 +1982,30 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 				TableName:      dataset,
 				CommandID:      cmd.ID,
 				LifecycleStage: cmd.LifecycleStage,
+				Action:         "backup",
+			})
+		}
+	}
+
+	// Include operations still in scaling/starting phase (not yet visible as CPLN commands)
+	for _, op := range s.getActiveOps() {
+		if op.Action != "restore" {
+			continue
+		}
+		// If CPLN command already exists for this table, clear the local tracking
+		alreadyTracked := false
+		for _, b := range backups {
+			if b.TableName == op.TableName {
+				alreadyTracked = true
+				s.clearActiveOp(op.TableName) // CPLN has taken over
+				break
+			}
+		}
+		if !alreadyTracked {
+			backups = append(backups, BackupStatus{
+				TableName:      op.TableName,
+				LifecycleStage: op.Phase,
+				Action:         "restore",
 			})
 		}
 	}
@@ -1979,6 +2123,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	backupWorkload := s.getBackupWorkload()
 	orchestratorWorkload := s.getOrchestratorWorkload()
 
+	// Check activeOps for operations still in scaling phase
+	if s.hasActiveOp(req.TableName) {
+		jsonError(w, http.StatusConflict,
+			fmt.Sprintf("operation already in progress for table %s (scaling)", req.TableName))
+		return
+	}
+
 	// Check backup workload for active operations
 	backupCommands, err := s.cplnClient.QueryActiveCommands(s.config.GVC, backupWorkload, 0)
 	if err != nil {
@@ -2013,12 +2164,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build env vars for cron workload
+	// Build env vars for cron workload — pass CPLN credentials so cron can handle its own scaling
 	envVars := []cpln.EnvVar{
 		{Name: "ACTION", Value: "restore"},
 		{Name: "DATASET", Value: req.TableName},
 		{Name: "TYPE", Value: req.Type},
 		{Name: "RESTORE_FILE", Value: req.Filename},
+		{Name: "SCALE_ORG", Value: s.config.Org},
+		{Name: "SCALE_GVC", Value: s.config.GVC},
+		{Name: "SCALE_WORKLOAD", Value: s.config.WorkloadName},
 	}
 
 	// For main table restore, use blue-green: discover active slot, target inactive
@@ -2056,9 +2210,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Derive orchestrator API server URL for cron callback
-		// CPLN internal DNS format: {workload-name}.{location}.cpln.local
+		// CPLN internal DNS: {workload}.{gvc}.cpln.local:{port}
 		orchestratorAPIName := strings.TrimSuffix(s.config.WorkloadName, "-manticore") + "-orchestrator-api"
-		orchestratorURL := fmt.Sprintf("http://%s.%s.cpln.local:8080", orchestratorAPIName, s.config.Location)
+		orchestratorURL := fmt.Sprintf("http://%s.%s.cpln.local:8080", orchestratorAPIName, s.config.GVC)
 
 		envVars = append(envVars,
 			cpln.EnvVar{Name: "SLOT", Value: targetSlot},
@@ -2074,28 +2228,44 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			"filename", req.Filename)
 	}
 
-	// Start the backup cron workload with restore action
-	overrides := []cpln.ContainerOverride{
-		{
-			Name: s.config.BackupContainer,
-			Env:  envVars,
-		},
-	}
-
-	slog.Info("triggering restore via cron workload", "table", req.TableName, "type", req.Type, "filename", req.Filename, "workload", backupWorkload)
-	cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start restore: %v", err))
-		return
-	}
+	// Track the operation for UI visibility and return immediately
+	s.setActiveOp(req.TableName, "restore", "starting")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":    "accepted",
-		"message":   fmt.Sprintf("%s restore started for table %s from %s", req.Type, req.TableName, req.Filename),
-		"commandId": cmd.ID,
+		"status":  "accepted",
+		"message": fmt.Sprintf("%s restore starting for table %s", req.Type, req.TableName),
 	})
+
+	// Start cron in background (scaling is handled by the cron job itself)
+	go func() {
+		tableName := req.TableName
+
+		// Start the backup cron workload with restore action
+		overrides := []cpln.ContainerOverride{
+			{
+				Name: s.config.BackupContainer,
+				Env:  envVars,
+			},
+		}
+
+		slog.Info("triggering restore via cron workload", "table", tableName, "type", req.Type, "filename", req.Filename, "workload", backupWorkload)
+		cmd, err := s.cplnClient.StartCronWorkload(s.config.GVC, backupWorkload, s.config.Location, overrides)
+		if err != nil {
+			slog.Error("failed to start restore cron workload", "table", tableName, "error", err)
+			s.clearActiveOp(tableName)
+			return
+		}
+
+		slog.Info("restore cron workload started", "table", tableName, "commandId", cmd.ID)
+
+		// Give CPLN time to propagate the command, then clean up local tracking
+		go func() {
+			time.Sleep(30 * time.Second)
+			s.clearActiveOp(tableName)
+		}()
+	}()
 }
 
 // handleRotateMain handles POST /api/rotate-main - rotates distributed table to a new main slot
@@ -2180,21 +2350,25 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 	// Use first reachable client for cluster operations
 	primary = reachableClients[0]
 
-	// Build agent addresses from reachable replicas only
+	// Build agent addresses from ALL replicas (maxScale), not just reachable ones.
+	// Manticore handles health checking on mirrors via ha_strategy.
 	locals := []string{newMainTable, deltaTable}
 	var agents []string
-	for _, c := range reachableClients {
+	for _, c := range clients {
 		agentAddr := extractAgentAddrFromClient(c.BaseURL())
 		if agentAddr != "" {
 			agents = append(agents, agentAddr)
 		}
 	}
 
-	// ALTER distributed table on each reachable replica
+	// ALTER distributed table on each reachable replica (with retry for rolling restarts)
 	slog.Info("swapping distributed table on reachable replicas", "table", distTable, "locals", locals, "agents", agents)
 	alterErrors := 0
 	for j, c := range reachableClients {
-		if err := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1); err != nil {
+		err := retryWithRecovery(r.Context(), fmt.Sprintf("alter distributed on replica %d", reachableIndices[j]), func() error {
+			return c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+		})
+		if err != nil {
 			slog.Error("failed to alter distributed table on replica", "replica", reachableIndices[j], "error", err)
 			alterErrors++
 			continue
@@ -2206,17 +2380,23 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove old table from cluster, then drop on reachable replicas
+	// Remove old table from cluster, then drop on reachable replicas (with retry for rolling restarts)
 	if tableConfig.ClusterMain {
 		slog.Info("removing old main table from cluster", "table", oldMainTable)
-		if err := primary.ClusterDrop(oldMainTable, 1); err != nil {
+		err := retryWithRecovery(r.Context(), "cluster drop "+oldMainTable, func() error {
+			return primary.ClusterDrop(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
 		}
 	}
 
 	slog.Info("dropping old main table on reachable replicas", "table", oldMainTable)
 	for j, c := range reachableClients {
-		if err := c.DropTable(oldMainTable, 1); err != nil {
+		err := retryWithRecovery(r.Context(), fmt.Sprintf("drop table %s on replica %d", oldMainTable, reachableIndices[j]), func() error {
+			return c.DropTable(oldMainTable, 1)
+		})
+		if err != nil {
 			slog.Warn("failed to drop old table", "table", oldMainTable, "replica", reachableIndices[j], "error", err)
 		}
 	}
@@ -2232,6 +2412,39 @@ func (s *Server) handleRotateMain(w http.ResponseWriter, r *http.Request) {
 		"reachableReplicas": len(reachableClients),
 		"totalReplicas":     replicaCount,
 	})
+}
+
+// retryWithRecovery retries an operation every 30s for up to 5 minutes.
+// This handles replicas restarting during a rollout triggered by scaling.
+func retryWithRecovery(ctx context.Context, operation string, fn func() error) error {
+	maxAttempts := 20 // 20 attempts × 30s = 10 minutes
+	retryInterval := 30 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 1 {
+				slog.Info("operation succeeded after retry", "operation", operation, "attempt", attempt)
+			}
+			return nil
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		slog.Warn("operation failed, retrying after wait",
+			"operation", operation, "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
 }
 
 // extractAgentAddrFromClient converts an HTTP base URL to a Manticore agent address (hostname:9306)
@@ -2259,14 +2472,32 @@ func runCLI(config Config) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	// Scale up replicas for import/repair operations if CPLN credentials are available
+	var scaleCleanup func()
+	replicaCount := getEnvInt("REPLICA_COUNT", 2)
+
+	if config.CplnToken != "" && config.Org != "" && (action == "import" || action == "repair") {
+		cplnClient := cpln.NewClient(config.CplnToken, config.Org)
+		maxScale, cleanup, err := cpln.ScaleForOperation(cplnClient, config.GVC, config.WorkloadName)
+		if err != nil {
+			slog.Warn("failed to scale up, proceeding with current replica count", "error", err)
+			scaleCleanup = func() {}
+		} else {
+			scaleCleanup = cleanup
+			replicaCount = maxScale // Use actual scaled count instead of static env var
+			slog.Info("replica count updated from scaling", "replicaCount", replicaCount)
+		}
+	} else {
+		scaleCleanup = func() {}
+	}
+	defer scaleCleanup()
+
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, initiating graceful shutdown", "signal", sig)
+		scaleCleanup() // Restore minScale before shutting down
 		cancel()
 	}()
-
-	// For CLI mode, we still need REPLICA_COUNT since we may not have cpln access
-	replicaCount := getEnvInt("REPLICA_COUNT", 2)
 
 	// TABLE_NAME is only required for import action
 	var csvPath string
@@ -2385,6 +2616,9 @@ func runCLI(config Config) {
 		slog.Error("unknown action", "action", action)
 		os.Exit(1)
 	}
+
+	// Scale down before exiting (defer won't run if os.Exit is called)
+	scaleCleanup()
 
 	if actionErr != nil {
 		slog.Error("action failed", "action", action, "error", actionErr)

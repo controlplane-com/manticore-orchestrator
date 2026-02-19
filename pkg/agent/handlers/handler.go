@@ -568,7 +568,25 @@ func (h *Handler) ClusterAddHandler(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, fmt.Sprintf("table %s added to cluster %s", req.Table, h.clusterName))
 }
 
-// ClusterDrop removes a table from the cluster (must be done before DROP TABLE)
+// ClusterRemove removes a table from the cluster (idempotent, must be done before DROP TABLE)
+func (h *Handler) ClusterRemove(tableName string) error {
+	sql := fmt.Sprintf("ALTER CLUSTER %s DROP %s", h.clusterName, tableName)
+	slog.Debug("removing table from cluster", "table", tableName, "cluster", h.clusterName, "sql", sql)
+
+	if err := h.client.Execute(sql); err != nil {
+		errMsg := err.Error()
+		// Treat as idempotent if table is not in cluster or not a recognized cluster table type
+		if strings.Contains(errMsg, "is not in cluster") || strings.Contains(errMsg, "unknown or wrong type of table") || strings.Contains(errMsg, "doesn't belong to cluster") {
+			slog.Debug("table not in cluster (idempotent)", "table", tableName, "cluster", h.clusterName)
+			return nil
+		}
+		return fmt.Errorf("failed to remove table from cluster: %w", err)
+	}
+
+	return nil
+}
+
+// ClusterDrop is the HTTP handler for ClusterRemove
 func (h *Handler) ClusterDrop(w http.ResponseWriter, r *http.Request) {
 	var req types.ClusterDropRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -581,17 +599,8 @@ func (h *Handler) ClusterDrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sql := fmt.Sprintf("ALTER CLUSTER %s DROP %s", h.clusterName, req.Table)
-	slog.Debug("removing table from cluster", "table", req.Table, "cluster", h.clusterName, "sql", sql)
-
-	if err := h.client.Execute(sql); err != nil {
-		// Check if table is not in cluster (idempotent)
-		if strings.Contains(err.Error(), "is not in cluster") {
-			slog.Debug("table not in cluster (idempotent)", "table", req.Table, "cluster", h.clusterName)
-			successResponse(w, fmt.Sprintf("table %s not in cluster %s", req.Table, h.clusterName))
-			return
-		}
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove table from cluster: %v", err))
+	if err := h.ClusterRemove(req.Table); err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -722,7 +731,7 @@ func (h *Handler) ClusterRejoin(req types.ClusterRejoinRequest) error {
 	return nil
 }
 
-// GetTableSchema returns the schema of a table using DESCRIBE
+// GetTableSchema returns the schema of a table from the YAML schema registry
 func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 	// Extract table name from URL path: /api/tables/{name}/schema
 	path := r.URL.Path
@@ -735,18 +744,21 @@ func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Query the delta table which has the actual column schema
-	// (both main and delta tables have the same columns, but distributed tables don't expose columns)
-	// For multi-segment tables, fallback to _delta_1 if _delta doesn't exist
-	deltaTable := tableName + "_delta"
-	columns, err := h.client.DescribeTable(deltaTable)
-	if err != nil {
-		deltaTable = tableName + "_delta_1"
-		columns, err = h.client.DescribeTable(deltaTable)
-		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to describe table: %v", err))
-			return
-		}
+	s, ok := h.registry.Get(tableName)
+	if !ok {
+		errorResponse(w, http.StatusNotFound, fmt.Sprintf("no schema found for table %s", tableName))
+		return
+	}
+
+	// Map registry columns to ColumnSchema format
+	var columns []schema.ColumnSchema
+	for _, col := range s.Columns {
+		ct := manticore.GetColumnType(col.Type)
+		rtType := manticore.GetRTTypeName(ct)
+		columns = append(columns, schema.ColumnSchema{
+			Field: col.Name,
+			Type:  rtType,
+		})
 	}
 
 	jsonResponse(w, http.StatusOK, schema.TableSchemaResponse{
@@ -757,12 +769,16 @@ func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 
 // TableConfigResponse represents table behavior configuration
 type TableConfigResponse struct {
-	Table           string `json:"table"`
-	ImportMethod    string `json:"importMethod"`
-	ClusterMain     bool   `json:"clusterMain"`
-	HAStrategy      string `json:"haStrategy"`
-	AgentRetryCount int    `json:"agentRetryCount"`
-	SegmentCount    int    `json:"segmentCount,omitempty"`
+	Table           string             `json:"table"`
+	ImportMethod    string             `json:"importMethod"`
+	ClusterMain     bool               `json:"clusterMain"`
+	HAStrategy      string             `json:"haStrategy"`
+	AgentRetryCount int                `json:"agentRetryCount"`
+	SegmentCount    int                `json:"segmentCount,omitempty"`
+	MemLimit        string             `json:"memLimit,omitempty"`
+	HasHeader       *bool              `json:"hasHeader,omitempty"`
+	CharsetTable    string             `json:"charsetTable,omitempty"`
+	Columns         []manticore.Column `json:"columns,omitempty"`
 }
 
 // GetTableConfig returns behavior configuration for a table
@@ -791,6 +807,10 @@ func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
 		HAStrategy:      schema.HAStrategy,
 		AgentRetryCount: schema.AgentRetryCount,
 		SegmentCount:    schema.SegmentCount,
+		MemLimit:        schema.MemLimit,
+		HasHeader:       schema.HasHeader,
+		CharsetTable:    schema.CharsetTable,
+		Columns:         schema.Columns,
 	})
 }
 

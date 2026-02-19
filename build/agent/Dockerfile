@@ -1,5 +1,5 @@
 # Build csv-to-manticore from GitHub
-FROM golang:1.25-alpine AS csv-builder
+FROM golang:1.25.7-alpine AS csv-builder
 RUN apk add --no-cache git
 ARG CACHEBUST=4
 WORKDIR /csv
@@ -7,7 +7,7 @@ RUN git clone https://github.com/Cuppojoe/csv-to-manticore.git .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /csv-to-manticore ./cmd/csv-to-manticore
 
 # Build agent
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25.7-alpine AS builder
 
 WORKDIR /app
 

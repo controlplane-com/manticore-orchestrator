@@ -444,6 +444,89 @@ func (c *Client) StartCronWorkload(gvc, workload, location string, containerOver
 	return c.CreateCommand(gvc, workload, "runCronWorkload", spec)
 }
 
+// GetWorkloadScaling returns the current minScale and maxScale for a workload
+func (c *Client) GetWorkloadScaling(gvc, workloadName string) (minScale, maxScale int, err error) {
+	workload, err := c.GetWorkload(gvc, workloadName)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	minScale = workload.Spec.DefaultOptions.Autoscaling.MinScale
+	maxScale = workload.Spec.DefaultOptions.Autoscaling.MaxScale
+
+	if maxScale <= 0 {
+		maxScale = 1
+	}
+	if minScale <= 0 {
+		minScale = 1
+	}
+
+	return minScale, maxScale, nil
+}
+
+// PatchWorkloadMinScale updates the minScale for a workload's autoscaling configuration
+func (c *Client) PatchWorkloadMinScale(gvc, workloadName string, minScale int) error {
+	path := fmt.Sprintf("/org/%s/gvc/%s/workload/%s", c.org, gvc, workloadName)
+	body := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"defaultOptions": map[string]interface{}{
+				"autoscaling": map[string]interface{}{
+					"minScale": minScale,
+				},
+			},
+		},
+	}
+	_, err := c.DoRequest("PATCH", path, body)
+	return err
+}
+
+// WaitForReplicasReady polls deployments until expectedCount replicas are ready or timeout
+func (c *Client) WaitForReplicasReady(gvc, workloadName string, expectedCount int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	pollInterval := 10 * time.Second
+
+	for time.Now().Before(deadline) {
+		deployments, err := c.GetDeployments(gvc, workloadName)
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		readyCount := 0
+		for _, dep := range deployments.Items {
+			for _, ver := range dep.Status.Versions {
+				if ver.Ready {
+					readyCount++
+				}
+			}
+		}
+
+		if readyCount >= expectedCount {
+			return nil
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("timed out waiting for %d replicas to be ready (timeout: %v)", expectedCount, timeout)
+}
+
+// GetCommand fetches a single command by ID
+func (c *Client) GetCommand(gvc, workload, commandID string) (*Command, error) {
+	path := fmt.Sprintf("/org/%s/gvc/%s/workload/%s/-command/%s", c.org, gvc, workload, commandID)
+	body, err := c.DoRequest("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var cmd Command
+	if err := json.Unmarshal(body, &cmd); err != nil {
+		return nil, fmt.Errorf("failed to decode command: %w", err)
+	}
+
+	return &cmd, nil
+}
+
 // DeploymentVersion represents a single replica's deployment status
 type DeploymentVersion struct {
 	Name       string                     `json:"name"`

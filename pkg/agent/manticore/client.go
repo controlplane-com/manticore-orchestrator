@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/schema"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -270,38 +269,6 @@ func (c *Client) GetClusterTables(clusterName string) (map[string]bool, error) {
 		}
 	}
 	return result, nil
-}
-
-// DescribeTable returns the schema of a table using DESCRIBE command
-func (c *Client) DescribeTable(tableName string) ([]schema.ColumnSchema, error) {
-	query := fmt.Sprintf("DESCRIBE %s", tableName)
-	rows, err := c.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	columns := []schema.ColumnSchema{}
-	for rows.Next() {
-		var field, colType string
-		var props *string
-		// DESCRIBE returns: Field, Type, Properties (Properties may be NULL)
-		if err := rows.Scan(&field, &colType, &props); err != nil {
-			// Try scanning without properties column (some versions may not have it)
-			if err := rows.Scan(&field, &colType); err != nil {
-				continue
-			}
-		}
-		col := schema.ColumnSchema{
-			Field: field,
-			Type:  colType,
-		}
-		if props != nil {
-			col.Props = *props
-		}
-		columns = append(columns, col)
-	}
-	return columns, nil
 }
 
 // GetQueryCount fetches the manticore_queries_count metric from the /metrics endpoint

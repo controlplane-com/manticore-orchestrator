@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,6 +208,22 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
+	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
+	// After a replica restart, the table may not exist even if the import reported success
+	// (manticore can crash from I/O pressure right after completing IMPORT TABLE).
+	// If a table is missing, re-run the import on that specific replica.
+	for seg := 1; seg <= ctx.SegmentCount; seg++ {
+		segMainTable := ctx.SegmentMainTableName(newSlot, seg)
+		segCSVPath := ctx.csvPathForSegment(seg)
+		slog.Debug("verifying table exists on all replicas before swap", "table", segMainTable)
+		for i, c := range ctx.Clients {
+			if err := ensureTableOnReplica(goCtx, c, i, segMainTable, segCSVPath, importConfig); err != nil {
+				cleanup()
+				return fmt.Errorf("table recovery failed before swap (seg %d): %w", seg, err)
+			}
+		}
+	}
+
 	// Step 6: Atomic swap - ALTER distributed table on ALL replicas with all segments
 	allNewMains := ctx.AllMainTableNames(newSlot)
 	allDeltas := ctx.AllDeltaTableNames()
@@ -223,7 +240,24 @@ func Import(goCtx context.Context, ctx *Context) error {
 	}
 
 	for i, c := range ctx.Clients {
-		if err := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 0); err != nil {
+		err := retryWithRecovery(goCtx, fmt.Sprintf("alter distributed on replica %d", i), func() error {
+			alterErr := c.AlterDistributed(distTable, locals, agents, tableConfig.HAStrategy, tableConfig.AgentRetryCount, 1)
+			if alterErr != nil && strings.Contains(alterErr.Error(), "no such local table") {
+				// Best-effort per-segment recovery during ALTER (all segments were verified in Step 5b)
+				slog.Warn("local table missing during ALTER, attempting per-segment recovery", "replica", i, "error", alterErr)
+				for seg := 1; seg <= ctx.SegmentCount; seg++ {
+					segTable := ctx.SegmentMainTableName(newSlot, seg)
+					segCSV := ctx.csvPathForSegment(seg)
+					if recoverErr := ensureTableOnReplica(goCtx, c, i, segTable, segCSV, importConfig); recoverErr != nil {
+						slog.Error("table recovery failed during ALTER", "replica", i, "seg", seg, "error", recoverErr)
+					} else {
+						slog.Info("segment recovered, will retry ALTER", "replica", i, "seg", seg)
+					}
+				}
+			}
+			return alterErr
+		})
+		if err != nil {
 			return fmt.Errorf("failed to alter distributed table on replica %d: %w", i, err)
 		}
 		slog.Debug("swapped distributed table", "replica", i, "agents", agents)
@@ -234,13 +268,19 @@ func Import(goCtx context.Context, ctx *Context) error {
 		oldMainTable := ctx.SegmentMainTableName(oldSlot, seg)
 		if tableConfig.ClusterMain {
 			slog.Debug("removing old main table from cluster", "table", oldMainTable)
-			if err := primary.ClusterDrop(oldMainTable, 0); err != nil {
+			err := retryWithRecovery(goCtx, "cluster drop "+oldMainTable, func() error {
+				return primary.ClusterDrop(oldMainTable, 1)
+			})
+			if err != nil {
 				slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
 			}
 		}
 		slog.Debug("dropping old main table on all replicas", "table", oldMainTable)
 		for i, c := range ctx.Clients {
-			if err := c.DropTable(oldMainTable, 0); err != nil {
+			err := retryWithRecovery(goCtx, fmt.Sprintf("drop table %s on replica %d", oldMainTable, i), func() error {
+				return c.DropTable(oldMainTable, 1)
+			})
+			if err != nil {
 				slog.Warn("failed to drop old table", "table", oldMainTable, "replica", i, "error", err)
 			} else {
 				slog.Debug("dropped old table", "table", oldMainTable, "replica", i)
@@ -307,6 +347,125 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 	return fmt.Errorf("replication timeout: table %s not replicated to all nodes after %d attempts", table, maxAttempts)
 }
 
+// ensureTableOnReplica verifies a table exists on a replica, re-importing if needed.
+// If the table is missing (e.g., after a replica restart during scaling), it re-creates
+// and re-imports the table on that specific replica before proceeding.
+func ensureTableOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx int,
+	table, csvPath string, importConfig client.ImportConfig) error {
+
+	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+		slog.Warn("table missing on replica, re-importing",
+			"replica", replicaIdx, "table", table, "verifyErr", err)
+		if createErr := c.CreateTable(table, 0); createErr != nil {
+			slog.Debug("CreateTable before re-import (may already exist)", "error", createErr)
+		}
+		if importErr := c.ImportWithContext(goCtx, table, csvPath, "", 0, importConfig); importErr != nil {
+			return fmt.Errorf("re-import on replica %d failed: %w", replicaIdx, importErr)
+		}
+		if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+			return fmt.Errorf("table still missing after re-import on replica %d: %w", replicaIdx, err)
+		}
+		slog.Info("table recovered on replica", "replica", replicaIdx, "table", table)
+	}
+	return nil
+}
+
+// verifyTableExists checks that a table exists on a specific replica.
+// First waits up to 10 minutes for the agent to become reachable (handles rolling restarts),
+// then checks for the table with a shorter timeout.
+func verifyTableExists(goCtx context.Context, c *client.AgentClient, table string, replicaIdx int) error {
+	// Phase 1: Wait for the agent to be reachable (up to 10 minutes).
+	// During a rolling restart the agent returns 503 or is unreachable entirely.
+	// WaitForHealth uses /api/health which bypasses K8s readiness gates.
+	healthTimeout := 10 * time.Minute
+	slog.Debug("waiting for agent health before table verification", "replica", replicaIdx, "timeout", healthTimeout)
+	if err := c.WaitForHealth(goCtx, healthTimeout); err != nil {
+		return fmt.Errorf("replica %d did not become healthy within %v: %w", replicaIdx, healthTimeout, err)
+	}
+
+	// Phase 2: Agent is healthy — verify the table exists.
+	// After a restart with clustered tables, the table should reappear via Galera SST.
+	// Poll for up to 2 minutes to allow replication/SST to complete.
+	maxAttempts := 12 // 12 attempts × 10s = 2 minutes
+	pollInterval := 10 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		select {
+		case <-goCtx.Done():
+			return goCtx.Err()
+		default:
+		}
+
+		tables, err := c.ListTables(1)
+		if err != nil {
+			slog.Warn("table verification: ListTables failed on healthy agent",
+				"replica", replicaIdx, "attempt", attempt, "error", err)
+			if attempt < maxAttempts {
+				select {
+				case <-goCtx.Done():
+					return goCtx.Err()
+				case <-time.After(pollInterval):
+				}
+			}
+			continue
+		}
+
+		for _, t := range tables {
+			if t.Name == table {
+				slog.Debug("table verified on replica", "replica", replicaIdx, "table", table)
+				return nil
+			}
+		}
+
+		slog.Warn("table not found on replica after import",
+			"replica", replicaIdx, "table", table, "attempt", attempt)
+
+		if attempt < maxAttempts {
+			select {
+			case <-goCtx.Done():
+				return goCtx.Err()
+			case <-time.After(pollInterval):
+			}
+		}
+	}
+
+	return fmt.Errorf("table %s not found on replica %d after agent recovered (table may have been lost during restart)", table, replicaIdx)
+}
+
+// retryWithRecovery retries an operation every 30s for up to 5 minutes.
+// This handles the case where a replica is restarting (e.g., from a rollout triggered by scaling)
+// and the operation fails because the agent is temporarily unavailable.
+func retryWithRecovery(ctx context.Context, operation string, fn func() error) error {
+	maxAttempts := 20 // 20 attempts × 30s = 10 minutes
+	retryInterval := 30 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			if attempt > 1 {
+				slog.Info("operation succeeded after retry", "operation", operation, "attempt", attempt)
+			}
+			return nil
+		}
+
+		if attempt == maxAttempts {
+			break
+		}
+
+		slog.Warn("operation failed, retrying after wait",
+			"operation", operation, "attempt", attempt, "maxAttempts", maxAttempts, "error", lastErr)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+		}
+	}
+
+	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
+}
+
 // importWithIndexer builds index locally, uploads to S3 or shared volume, and imports on agents
 func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, tableConfig *client.TableConfigResponse, primary *client.AgentClient, cleanup func()) error {
 	// Validate indexer builder is configured
@@ -354,25 +513,12 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 		"workDir", workDir,
 		"useSharedVolume", useSharedVolume)
 
-	// Get table schema from agent to determine columns
-	schemaResp, err := primary.GetTableSchema(ctx.Dataset, 1)
-	if err != nil {
-		cleanup()
-		return fmt.Errorf("failed to get table schema: %w", err)
-	}
-
-	// Convert schema columns to indexer columns
-	// Skip the 'id' column as it's auto-generated
+	// Use columns from schema registry (YAML config) — preserves user-declared order
 	var columns []indexer.Column
-	for _, col := range schemaResp.Columns {
-		if col.Field == "id" {
-			continue
-		}
-		// Map Manticore types to indexer types
-		indexerType := mapManticoreTypeToIndexer(col.Type)
+	for _, col := range tableConfig.Columns {
 		columns = append(columns, indexer.Column{
-			Name: col.Field,
-			Type: indexerType,
+			Name: col.Name,
+			Type: col.Type, // Already in indexer-compatible format (attr_timestamp, field, etc.)
 		})
 	}
 
@@ -380,19 +526,28 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 	// The shared volume is only used for indexer output, not for source data
 	sourcePath := filepath.Join(ctx.S3Mount, ctx.CSVPath)
 
-	// Set memory limit
-	memLimit := ctx.ImportMemLimit
+	// Set memory limit: table config > context > default
+	memLimit := tableConfig.MemLimit
+	if memLimit == "" {
+		memLimit = ctx.ImportMemLimit
+	}
 	if memLimit == "" {
 		memLimit = indexer.DefaultMemLimit
 	}
 
 	// Build index
 	cfg := &indexer.Config{
-		WorkDir:    workDir,
-		TableName:  targetTable,
-		SourcePath: sourcePath,
-		Columns:    columns,
-		MemLimit:   memLimit,
+		WorkDir:      workDir,
+		TableName:    targetTable,
+		SourcePath:   sourcePath,
+		Columns:      columns,
+		MemLimit:     memLimit,
+		CharsetTable: tableConfig.CharsetTable,
+	}
+
+	// Use explicit hasHeader from config if set, otherwise auto-detect
+	if tableConfig.HasHeader != nil {
+		cfg.HasHeader = *tableConfig.HasHeader
 	}
 
 	result, err := ctx.IndexerBuilder.Build(goCtx, cfg)
@@ -481,32 +636,3 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 	return nil
 }
 
-// mapManticoreTypeToIndexer maps Manticore column types to indexer types
-func mapManticoreTypeToIndexer(manticoreType string) string {
-	// Manticore DESCRIBE returns types like: text, string, uint, bigint, float, bool, timestamp, multi, multi64, json
-	// Indexer uses: field, field_string, attr_string, attr_uint, attr_bigint, attr_float, attr_bool, attr_timestamp, attr_multi, attr_multi_64, attr_json
-	switch manticoreType {
-	case "text":
-		return "field"
-	case "string":
-		return "attr_string"
-	case "uint":
-		return "attr_uint"
-	case "bigint":
-		return "attr_bigint"
-	case "float":
-		return "attr_float"
-	case "bool":
-		return "attr_bool"
-	case "timestamp":
-		return "attr_timestamp"
-	case "multi":
-		return "attr_multi"
-	case "multi64":
-		return "attr_multi_64"
-	case "json":
-		return "attr_json"
-	default:
-		return "field" // default to field
-	}
-}
