@@ -297,6 +297,8 @@ func preprocessToTSV(srcPath, dstPath string, hasHeader bool, columns []Column) 
 			switch col.Type {
 			case "attr_bool":
 				fields[i] = convertBool(fields[i])
+			case "attr_timestamp":
+				fields[i] = convertTimestamp(fields[i])
 			}
 		}
 
@@ -352,6 +354,44 @@ func csvHasHeader(csvPath string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// convertTimestamp converts a datetime string to a Unix epoch integer string for Manticore's
+// attr_timestamp type. Handles common formats (with/without timezone, with/without microseconds).
+// If the value is already a plain integer it is passed through unchanged. Empty or unparseable
+// values are converted to "0".
+func convertTimestamp(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "0"
+	}
+
+	// Already a Unix integer — pass through
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return value
+	}
+
+	formats := []string{
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999 -0700",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+
+	for _, layout := range formats {
+		if t, err := time.Parse(layout, value); err == nil {
+			return strconv.FormatInt(t.Unix(), 10)
+		}
+	}
+
+	slog.Warn("could not parse timestamp value, using 0", "value", value)
+	return "0"
 }
 
 // convertBool converts boolean-like values to 0/1 for Manticore's uint representation
