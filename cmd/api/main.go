@@ -91,6 +91,8 @@ type Server struct {
 	cronScheduler *cron.Cron // Background backup scheduler (nil if no schedules configured)
 	activeOps     map[string]*ActiveOperation // keyed by tableName
 	activeOpsMu   sync.RWMutex
+	lockedTables  map[string]bool // tables locked from import/restore
+	lockedTablesMu sync.RWMutex
 }
 
 // TableConfig represents a table configuration entry
@@ -241,6 +243,7 @@ func runServer(config Config) {
 		cplnClient:   cplnClient,
 		backupClient: backupClient,
 		activeOps:    make(map[string]*ActiveOperation),
+		lockedTables: make(map[string]bool),
 	}
 
 	// Start background repair loop
@@ -290,6 +293,7 @@ func runServer(config Config) {
 	mux.HandleFunc("/api/cluster/discover", server.handleClusterDiscover)
 	mux.HandleFunc("/api/cluster/query-counts", server.handleClusterQueryCounts)
 	mux.HandleFunc("/api/tables/status", server.handleTablesStatus)
+	mux.HandleFunc("/api/tables/locks", server.handleTableLocks)
 	mux.HandleFunc("/api/tables/", server.handleTableSchema)
 	mux.HandleFunc("/api/backup", server.handleBackup)
 	mux.HandleFunc("/api/imports", server.handleImports)
@@ -1028,15 +1032,27 @@ func (s *Server) handleTablesStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleTableSchema handles GET /api/tables/{name}/schema - proxies to first online replica
+// handleTableSchema handles GET /api/tables/{name}/schema and POST /api/tables/{name}/lock
 func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/tables/")
+
+	// Dispatch POST /api/tables/{name}/lock
+	if strings.HasSuffix(path, "/lock") {
+		tableName := strings.TrimSuffix(path, "/lock")
+		if tableName == "" {
+			jsonError(w, http.StatusBadRequest, "table name required")
+			return
+		}
+		s.handleTableLockToggle(w, r, tableName)
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Extract table name from URL path: /api/tables/{name}/schema
-	path := strings.TrimPrefix(r.URL.Path, "/api/tables/")
 	path = strings.TrimSuffix(path, "/schema")
 	tableName := path
 
@@ -1075,6 +1091,63 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 	} else {
 		jsonError(w, http.StatusServiceUnavailable, "no replicas available")
 	}
+}
+
+// isTableLocked returns true if the table has been locked from imports/restores.
+func (s *Server) isTableLocked(tableName string) bool {
+	s.lockedTablesMu.RLock()
+	defer s.lockedTablesMu.RUnlock()
+	return s.lockedTables[tableName]
+}
+
+// setTableLock sets the lock state for a table.
+func (s *Server) setTableLock(tableName string, locked bool) {
+	s.lockedTablesMu.Lock()
+	defer s.lockedTablesMu.Unlock()
+	if locked {
+		s.lockedTables[tableName] = true
+	} else {
+		delete(s.lockedTables, tableName)
+	}
+}
+
+// handleTableLocks handles GET /api/tables/locks - returns all locked table names.
+func (s *Server) handleTableLocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	s.lockedTablesMu.RLock()
+	locked := make([]string, 0, len(s.lockedTables))
+	for name := range s.lockedTables {
+		locked = append(locked, name)
+	}
+	s.lockedTablesMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"lockedTables": locked})
+}
+
+// handleTableLockToggle handles POST /api/tables/{name}/lock - lock or unlock a table.
+func (s *Server) handleTableLockToggle(w http.ResponseWriter, r *http.Request, tableName string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Locked bool `json:"locked"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	s.setTableLock(tableName, req.Locked)
+	action := "unlocked"
+	if req.Locked {
+		action = "locked"
+	}
+	slog.Info("table lock state changed", "table", tableName, "locked", req.Locked)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": action})
 }
 
 // handleHealth handles GET /api/health
@@ -1706,6 +1779,12 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if table is locked
+	if s.isTableLocked(req.TableName) {
+		jsonError(w, http.StatusLocked, fmt.Sprintf("table '%s' is locked — unlock it on the Tables page before importing", req.TableName))
+		return
+	}
+
 	orchestratorWorkload := s.getOrchestratorWorkload()
 
 	// Check for in-progress imports or repairs (pending or running) in a single query
@@ -2117,6 +2196,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Validate table exists in config
 	if _, err := getCSVPathForTable(s.config.TablesConfig, req.TableName); err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Check if table is locked
+	if s.isTableLocked(req.TableName) {
+		jsonError(w, http.StatusLocked, fmt.Sprintf("table '%s' is locked — unlock it on the Tables page before restoring", req.TableName))
 		return
 	}
 

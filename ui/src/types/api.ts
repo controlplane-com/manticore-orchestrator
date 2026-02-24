@@ -247,3 +247,8 @@ export interface RestoreRequest {
   filename: string;
   type?: 'delta' | 'main';
 }
+
+// Table locks response from /api/tables/locks
+export interface TableLocksResponse {
+  lockedTables: string[];
+}

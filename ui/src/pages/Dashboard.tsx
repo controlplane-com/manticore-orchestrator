@@ -9,6 +9,7 @@ import { FormSelect } from '../components/FormSelect';
 import { ConfirmActionModal } from '../components/ConfirmActionModal';
 import { useToast } from '../hooks/useToast';
 import { getStatus, getConfig, getCluster, getClusterDiscovery, getImports, getBackups, getRepairs, getCommandHistory, importTable, backupTable, repairCluster, getBackupFiles, restoreTable } from '../api/orchestrator';
+import { isTableLocked } from '../utils/tableLocks';
 import {
   HeartIcon,
   TableCellsIcon,
@@ -236,6 +237,16 @@ export const Dashboard = () => {
   };
 
   const openConfirmModal = (action: 'import' | 'repair' | 'backup' | 'restore') => {
+    // Block import/restore if the table is locked
+    if (action === 'import' && isTableLocked(selectedTable)) {
+      toast.error('Import blocked', `Table "${selectedTable}" is locked. Unlock it on the Tables page first.`);
+      return;
+    }
+    if (action === 'restore' && isTableLocked(selectedRestoreTable)) {
+      toast.error('Restore blocked', `Table "${selectedRestoreTable}" is locked. Unlock it on the Tables page first.`);
+      return;
+    }
+
     const configs = {
       import: {
         title: 'Import Data',
