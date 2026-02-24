@@ -6,7 +6,9 @@ import { Badge } from '../components/Badge';
 import { Button } from '../components/Button';
 import { LoadingSpinner, LoadingPage } from '../components/LoadingSpinner';
 import { SchemaModal } from '../components/SchemaModal';
-import { getTablesStatus, getConfig, getImports } from '../api/orchestrator';
+import { ConfirmActionModal } from '../components/ConfirmActionModal';
+import { getTablesStatus, getConfig, getImports, setTableLock } from '../api/orchestrator';
+import { getLockedTables, lockTable, unlockTable } from '../utils/tableLocks';
 import type { TableStatusEntry, TableReplicaStatus, ImportStatus } from '../types/api';
 import {
   TableCellsIcon,
@@ -17,6 +19,8 @@ import {
   ExclamationTriangleIcon,
   ArrowPathIcon,
   DocumentTextIcon,
+  LockClosedIcon,
+  LockOpenIcon,
 } from '@heroicons/react/24/outline';
 
 // Get overall table health status
@@ -130,12 +134,30 @@ const ReplicaRow = ({ replica, clusterMain }: { replica: TableReplicaStatus; clu
 };
 
 // Expandable table row
-const TableRow = ({ table, slot, importStatus, onViewSchema }: { table: TableStatusEntry; slot: string; importStatus?: ImportStatus; onViewSchema: (tableName: string) => void }) => {
+const TableRow = ({ table, slot, importStatus, locked, onViewSchema, onToggleLock }: {
+  table: TableStatusEntry;
+  slot: string;
+  importStatus?: ImportStatus;
+  locked: boolean;
+  onViewSchema: (tableName: string) => void;
+  onToggleLock: (tableName: string, lock: boolean) => void;
+}) => {
   const [expanded, setExpanded] = useState(false);
+  const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);
   const health = getTableHealth(table);
   const onlineCount = table.replicas.filter(r => r.online).length;
 
+  const handleLockClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (locked) {
+      setShowUnlockConfirm(true);
+    } else {
+      onToggleLock(table.name, true);
+    }
+  };
+
   return (
+    <>
     <Card className="overflow-hidden">
       <div
         className="p-4 flex items-center justify-between cursor-pointer hover:bg-gray-50 dark:hover:bg-stone-700"
@@ -154,6 +176,12 @@ const TableRow = ({ table, slot, importStatus, onViewSchema }: { table: TableSta
             <div>
               <div className="flex items-center gap-2">
                 <h4 className="font-medium text-gray-900 dark:text-white">{table.name}</h4>
+                {locked && (
+                  <Badge variant="warning">
+                    <LockClosedIcon className="h-3 w-3 mr-1" />
+                    Locked
+                  </Badge>
+                )}
                 {importStatus && (
                   <span className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400">
                     <ArrowPathIcon className="h-4 w-4 animate-spin" />
@@ -169,6 +197,13 @@ const TableRow = ({ table, slot, importStatus, onViewSchema }: { table: TableSta
         </div>
 
         <div className="flex items-center gap-4">
+          <button
+            onClick={handleLockClick}
+            className={`p-1 ${locked ? 'text-yellow-500 hover:text-yellow-600' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'}`}
+            title={locked ? 'Unlock table' : 'Lock table'}
+          >
+            {locked ? <LockClosedIcon className="h-5 w-5" /> : <LockOpenIcon className="h-5 w-5" />}
+          </button>
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -208,6 +243,20 @@ const TableRow = ({ table, slot, importStatus, onViewSchema }: { table: TableSta
         </div>
       )}
     </Card>
+
+    <ConfirmActionModal
+      isOpen={showUnlockConfirm}
+      onClose={() => setShowUnlockConfirm(false)}
+      onConfirm={() => {
+        onToggleLock(table.name, false);
+        setShowUnlockConfirm(false);
+      }}
+      title="Unlock Table"
+      message={`Unlocking "${table.name}" will allow import and restore actions to be performed on it. Are you sure you want to unlock this table?`}
+      confirmText="Unlock"
+      confirmButtonClass="bg-yellow-500 text-white hover:bg-yellow-600"
+    />
+    </>
   );
 };
 
@@ -246,6 +295,18 @@ export const Tables = () => {
       return hasActiveImports ? 2000 : 30000;
     },
   });
+
+  // Lock state lives in localStorage — instant, consistent, no server round-trip races
+  const [lockedTables, setLockedTables] = useState<string[]>(getLockedTables);
+
+  const isTableLocked = (tableName: string) => lockedTables.includes(tableName);
+
+  const handleToggleLock = (tableName: string, lock: boolean) => {
+    const next = lock ? lockTable(tableName) : unlockTable(tableName);
+    setLockedTables(next);
+    // Best-effort sync to server (enforces lock on single-replica deployments)
+    setTableLock(tableName, lock).catch(() => {});
+  };
 
   // Helper to get import status for a table
   const getImportForTable = (tableName: string) => {
@@ -368,7 +429,9 @@ export const Tables = () => {
               table={table}
               slot={getSlot(table.name)}
               importStatus={getImportForTable(table.name)}
+              locked={isTableLocked(table.name)}
               onViewSchema={handleViewSchema}
+              onToggleLock={handleToggleLock}
             />
           ))}
         </div>

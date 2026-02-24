@@ -19,6 +19,7 @@ import type {
   SqlBroadcastResponse,
   QueryCountsResponse,
   BackupFilesResponse,
+  TableLocksResponse,
 } from '../types/api';
 
 const api = axios.create({
@@ -144,6 +145,18 @@ export const getBackupFiles = async (tableName: string, type: string = 'delta'):
 // Restore a table from backup (authenticated)
 export const restoreTable = async (request: RestoreRequest): Promise<ApiResponse> => {
   const response = await api.post('/restore', request);
+  return response.data;
+};
+
+// Get locked tables (authenticated)
+export const getTableLocks = async (): Promise<TableLocksResponse> => {
+  const response = await api.get('/tables/locks');
+  return response.data;
+};
+
+// Lock or unlock a table (authenticated)
+export const setTableLock = async (tableName: string, locked: boolean): Promise<ApiResponse> => {
+  const response = await api.post(`/tables/${encodeURIComponent(tableName)}/lock`, { locked });
   return response.data;
 };
 
