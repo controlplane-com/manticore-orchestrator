@@ -190,11 +190,21 @@ func Import(goCtx context.Context, ctx *Context) error {
 				return primary.ClusterDrop(oldMainTable, 1)
 			})
 			if err != nil {
-				slog.Warn("failed to remove old table from cluster", "table", oldMainTable, "error", err)
+				slog.Warn("failed to remove old table from cluster on primary", "table", oldMainTable, "error", err)
 			}
 		}
 		slog.Debug("dropping old main table on all replicas", "table", oldMainTable)
 		for i, c := range ctx.Clients {
+			// For clustered tables, explicitly remove the cluster registration on this specific replica
+			// before dropping the local table. A replica that was in SST during the primary's ClusterDrop
+			// may have missed that cluster-wide operation and still consider the table part of the cluster,
+			// causing DROP TABLE to fail with "unable to drop a cluster table".
+			if tableConfig.ClusterMain {
+				if err := c.ClusterDrop(oldMainTable, 1); err != nil {
+					slog.Debug("cluster drop on replica skipped (likely already removed)",
+						"replica", i, "table", oldMainTable, "error", err)
+				}
+			}
 			err := executeWithRetries(goCtx, fmt.Sprintf("drop table %s on replica %d", oldMainTable, i), func() error {
 				return c.DropTable(oldMainTable, 1)
 			})
