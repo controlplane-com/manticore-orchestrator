@@ -416,22 +416,10 @@ func (c *AgentClient) CancelImport(jobID string, maxRetries int) error {
 	return err
 }
 
-// Import performs an async import with polling (backward compatible)
-// This replaces the old synchronous Import method
-// maxRetries: 1 = no retries, 0 = use default (5)
-func (c *AgentClient) Import(table, csvPath, cluster string, maxRetries int) error {
-	return c.ImportWithContext(context.Background(), table, csvPath, cluster, maxRetries, ImportConfigFromEnv())
-}
-
-// ImportWithConfig performs an async import with custom polling configuration
-func (c *AgentClient) ImportWithConfig(table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
-	return c.ImportWithContext(context.Background(), table, csvPath, cluster, maxRetries, config)
-}
-
-// ImportWithContext performs an async import with context support for cancellation.
+// Import performs an async import with context support for cancellation.
 // Includes restart resilience: if the agent becomes unreachable (e.g. pod restart),
 // waits up to 5 minutes for recovery and re-submits the import.
-func (c *AgentClient) ImportWithContext(ctx context.Context, table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
+func (c *AgentClient) Import(ctx context.Context, table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
 	// Build import request from config
 	req := types.ImportRequest{
 		Table:             table,
