@@ -77,35 +77,81 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
-	importConfig := client.ImportConfigFromEnv()
+	// Track per-segment state so Step 5b can use the correct importConfig (with PrebuiltIndexPath set)
+	type segState struct {
+		mainTable    string
+		csvPath      string
+		importConfig client.ImportConfig
+	}
+	segs := make([]segState, 0, ctx.SegmentCount)
 
-	// Loop over segments, build/upload/import each
+	// Steps 2–4: Build index and import each segment
 	for seg := 1; seg <= ctx.SegmentCount; seg++ {
 		newMainTable := ctx.SegmentMainTableName(newSlot, seg)
 		segCSVPath := ctx.csvPathForSegment(seg)
-		slog.Info("importing segment (indexer)", "seg", seg, "table", newMainTable, "csv", segCSVPath)
-		if err := buildAndImportIndex(goCtx, ctx, segCSVPath, newMainTable, tableConfig, primary, cleanup); err != nil {
+		slog.Info("building index for segment", "seg", seg, "table", newMainTable, "csv", segCSVPath)
+
+		agentIndexPath, err := buildIndex(goCtx, ctx, segCSVPath, newMainTable, tableConfig, cleanup)
+		if err != nil {
 			return err
 		}
+
+		importConfig := client.ImportConfigFromEnv()
+		importConfig.PrebuiltIndexPath = agentIndexPath
+
 		if tableConfig.ClusterMain {
+			if err := importOnReplica(goCtx, primary, 0, newMainTable, segCSVPath, ctx.Cluster, importConfig); err != nil {
+				cleanup()
+				return fmt.Errorf("segment %d import failed: %w", seg, err)
+			}
 			if err := waitForReplication(goCtx, ctx, newMainTable); err != nil {
 				cleanup()
 				return fmt.Errorf("replication wait failed for segment %d: %w", seg, err)
 			}
+		} else {
+			importCtx, cancelImports := context.WithCancel(goCtx)
+
+			var wg sync.WaitGroup
+			errCh := make(chan error, len(ctx.Clients))
+
+			for i, c := range ctx.Clients {
+				wg.Add(1)
+				go func(replicaIdx int, replicaClient *client.AgentClient) {
+					defer wg.Done()
+					if err := importOnReplica(importCtx, replicaClient, replicaIdx, newMainTable, segCSVPath, "", importConfig); err != nil {
+						slog.Error("import failed on replica", "replica", replicaIdx, "error", err)
+						errCh <- err
+						cancelImports()
+					}
+				}(i, c)
+			}
+
+			wg.Wait()
+			cancelImports()
+			close(errCh)
+
+			var errs []error
+			for e := range errCh {
+				errs = append(errs, e)
+			}
+			if len(errs) > 0 {
+				cleanup()
+				return fmt.Errorf("%d replica(s) failed: %w", len(errs), errs[0])
+			}
 		}
+
+		segs = append(segs, segState{newMainTable, segCSVPath, importConfig})
 	}
 
 	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
-	// After a replica restart, the table may not exist even if the import reported success
+	// After a replica restart, the table may not exist even if the import reported success.
 	// If a table is missing, re-run the import on that specific replica.
-	for seg := 1; seg <= ctx.SegmentCount; seg++ {
-		segMainTable := ctx.SegmentMainTableName(newSlot, seg)
-		segCSVPath := ctx.csvPathForSegment(seg)
-		slog.Debug("verifying table exists on all replicas before swap", "table", segMainTable)
+	for _, si := range segs {
+		slog.Debug("verifying table exists on all replicas before swap", "table", si.mainTable)
 		for i, c := range ctx.Clients {
-			if err := ensureTableOnReplica(goCtx, c, i, segMainTable, segCSVPath, importConfig); err != nil {
+			if err := ensureTableOnReplica(goCtx, c, i, si.mainTable, si.csvPath, si.importConfig); err != nil {
 				cleanup()
-				return fmt.Errorf("table recovery failed before swap (seg %d): %w", seg, err)
+				return fmt.Errorf("table recovery failed before swap: %w", err)
 			}
 		}
 	}
@@ -190,6 +236,8 @@ func tableExistsOnClient(c *client.AgentClient, tableName string, retries int) (
 }
 
 // waitForReplication waits for a table to be present on all replicas (Galera replication).
+// When a replica is unreachable (e.g. 503 during SST), WaitForHealth is called to wait for
+// it to recover before continuing — preventing the function from timing out prematurely.
 func waitForReplication(goCtx context.Context, ctx *Context, table string) error {
 	maxAttempts := 30
 	pollInterval := 2 * time.Second
@@ -208,9 +256,18 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 
 		allReady := true
 		for i, c := range ctx.Clients {
-			exists, err := tableExistsOnClient(c, table, 0)
+			// Use a single attempt per poll — the outer loop handles retrying.
+			// Passing retries=0 would default to 5 internal retries (×3s each), causing the outer
+			// loop to burn through its maxAttempts budget far faster than the pollInterval suggests.
+			exists, err := tableExistsOnClient(c, table, 1)
 			if err != nil {
-				slog.Debug("failed to list tables on replica", "replica", i, "error", err)
+				// Replica is unreachable — likely in SST or restarting after receiving the new table.
+				// Wait for it to become healthy before counting this as a failed iteration.
+				slog.Debug("replica unreachable during replication check, waiting for health",
+					"replica", i, "table", table, "error", err)
+				if healthErr := c.WaitForHealth(goCtx, 10*time.Minute); healthErr != nil {
+					return fmt.Errorf("replica %d did not recover during replication wait: %w", i, healthErr)
+				}
 				allReady = false
 			} else if !exists {
 				slog.Debug("table not yet replicated", "replica", i, "table", table)
@@ -248,13 +305,7 @@ func ensureTableOnReplica(goCtx context.Context, c *client.AgentClient, replicaI
 		if createErr := c.CreateTable(table, 0); createErr != nil {
 			slog.Debug("CreateTable before re-import (may already exist)", "error", createErr)
 		}
-		if importErr := c.RunImport(goCtx, table, csvPath, "", 0, importConfig); importErr != nil {
-			return fmt.Errorf("re-import on replica %d failed: %w", replicaIdx, importErr)
-		}
-		if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
-			return fmt.Errorf("table still missing after re-import on replica %d: %w", replicaIdx, err)
-		}
-		slog.Info("table recovered on replica", "replica", replicaIdx, "table", table)
+		return importOnReplica(goCtx, c, replicaIdx, table, csvPath, "", importConfig)
 	}
 	return nil
 }
@@ -343,13 +394,14 @@ func executeWithRetries(ctx context.Context, operation string, fn func() error) 
 	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
 }
 
-// buildAndImportIndex builds an RT index from the given CSV onto the shared volume and imports it on agents
-func buildAndImportIndex(goCtx context.Context, ctx *Context, csvPath, targetTable string, tableConfig *client.TableConfigResponse, primary *client.AgentClient, cleanup func()) error {
+// buildIndex converts a CSV/TSV source file into an RT table folder on the shared volume.
+// Returns the path to the built index, accessible by all agent pods via the shared volume.
+func buildIndex(goCtx context.Context, ctx *Context, csvPath, targetTable string, tableConfig *client.TableConfigResponse, cleanup func()) (string, error) {
 	if ctx.IndexerBuilder == nil {
-		return fmt.Errorf("indexer builder not configured (required for indexer method)")
+		return "", fmt.Errorf("indexer builder not configured (required for indexer method)")
 	}
 	if ctx.SharedVolumeMount == "" {
-		return fmt.Errorf("shared volume mount not configured (required for indexer method)")
+		return "", fmt.Errorf("shared volume mount not configured (required for indexer method)")
 	}
 
 	// Generate unique import ID for this operation
@@ -360,7 +412,7 @@ func buildAndImportIndex(goCtx context.Context, ctx *Context, csvPath, targetTab
 	workDir := filepath.Join(ctx.SharedVolumeMount, "indexer-output", ctx.Dataset, importID)
 	agentIndexPath := filepath.Join(workDir, "data", targetTable)
 
-	slog.Info("starting indexer import",
+	slog.Info("starting index build",
 		"table", targetTable,
 		"importID", importID,
 		"workDir", workDir)
@@ -404,7 +456,7 @@ func buildAndImportIndex(goCtx context.Context, ctx *Context, csvPath, targetTab
 	result, err := ctx.IndexerBuilder.Build(goCtx, cfg)
 	if err != nil {
 		cleanup()
-		return fmt.Errorf("index build failed: %w", err)
+		return "", fmt.Errorf("index build failed: %w", err)
 	}
 	slog.Info("index built", "rows", result.RowCount, "path", result.IndexPath)
 
@@ -414,59 +466,26 @@ func buildAndImportIndex(goCtx context.Context, ctx *Context, csvPath, targetTab
 	select {
 	case <-goCtx.Done():
 		cleanup()
-		return goCtx.Err()
+		return "", goCtx.Err()
 	case <-time.After(syncDelay):
 	}
 
-	importConfig := client.ImportConfigFromEnv()
-	importConfig.PrebuiltIndexPath = agentIndexPath
+	return agentIndexPath, nil
+}
 
-	// For clustered tables: import on primary only (replicates automatically)
-	// For non-clustered: import on all replicas in parallel
-	if tableConfig.ClusterMain {
-		slog.Debug("importing prebuilt index (clustered)", "table", targetTable, "path", agentIndexPath)
-		if err := primary.RunImport(goCtx, targetTable, csvPath, ctx.Cluster, 0, importConfig); err != nil {
-			cleanup()
-			return fmt.Errorf("failed to import prebuilt index: %w", err)
-		}
-		slog.Info("prebuilt index import completed on primary")
-	} else {
-		slog.Debug("importing prebuilt index on all replicas (non-clustered)", "table", targetTable, "path", agentIndexPath)
+// importOnReplica invokes the agent's Import method on a single replica and verifies the table
+// exists afterwards. The importConfig must have PrebuiltIndexPath set to the shared-volume path
+// returned by buildIndex.
+func importOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx int,
+	table, csvPath, cluster string, importConfig client.ImportConfig) error {
 
-		importCtx, cancelImports := context.WithCancel(goCtx)
-		defer cancelImports()
-
-		var wg sync.WaitGroup
-		errCh := make(chan error, len(ctx.Clients))
-
-		for i, c := range ctx.Clients {
-			wg.Add(1)
-			go func(replicaIdx int, replicaClient *client.AgentClient) {
-				defer wg.Done()
-				slog.Debug("importing prebuilt index on replica", "replica", replicaIdx, "table", targetTable)
-				if err := replicaClient.RunImport(importCtx, targetTable, csvPath, "", 0, importConfig); err != nil {
-					slog.Error("prebuilt index import failed on replica", "replica", replicaIdx, "error", err)
-					errCh <- fmt.Errorf("failed to import on replica %d: %w", replicaIdx, err)
-					cancelImports()
-				} else {
-					slog.Info("prebuilt index import completed on replica", "replica", replicaIdx)
-				}
-			}(i, c)
-		}
-
-		wg.Wait()
-		close(errCh)
-
-		var errors []error
-		for err := range errCh {
-			errors = append(errors, err)
-		}
-
-		if len(errors) > 0 {
-			cleanup()
-			return fmt.Errorf("%d replica(s) failed: %w", len(errors), errors[0])
-		}
+	slog.Debug("importing on replica", "replica", replicaIdx, "table", table)
+	if err := c.RunImport(goCtx, table, csvPath, cluster, 0, importConfig); err != nil {
+		return fmt.Errorf("import failed on replica %d: %w", replicaIdx, err)
 	}
-
+	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
+		return fmt.Errorf("table verification failed after import on replica %d: %w", replicaIdx, err)
+	}
+	slog.Info("import verified on replica", "replica", replicaIdx, "table", table)
 	return nil
 }
