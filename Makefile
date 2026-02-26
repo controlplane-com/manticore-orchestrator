@@ -26,25 +26,25 @@ help: ## Show this help
 	@echo "  make release-agent VERSION=v0.1.0"
 	@echo "  make release-all VERSION=v0.2.2 REGISTRY=ghcr.io/myuser"
 
-# Build targets (using buildx for cross-platform support)
+# Build targets
 build-api: ## Build API (orchestrator) image
 	@echo "Building $(API_IMAGE):$(VERSION) for $(PLATFORM)"
-	docker buildx build --platform $(PLATFORM) -f ./build/api/Dockerfile -t $(API_IMAGE):$(VERSION) --load .
+	docker build --platform $(PLATFORM) -f ./build/api/Dockerfile -t $(API_IMAGE):$(VERSION) .
 	@echo "Built $(API_IMAGE):$(VERSION)"
 
 build-agent: ## Build agent image
 	@echo "Building $(AGENT_IMAGE):$(VERSION) for $(PLATFORM)"
-	docker buildx build --platform $(PLATFORM) -f ./build/agent/Dockerfile -t $(AGENT_IMAGE):$(VERSION) --load .
+	docker build --platform $(PLATFORM) -f ./build/agent/Dockerfile -t $(AGENT_IMAGE):$(VERSION) .
 	@echo "Built $(AGENT_IMAGE):$(VERSION)"
 
 build-ui: ## Build UI image
 	@echo "Building $(UI_IMAGE):$(VERSION) for $(PLATFORM)"
-	docker buildx build --platform $(PLATFORM) -f ./build/ui/Dockerfile -t $(UI_IMAGE):$(VERSION) --load ./ui
+	docker build --platform $(PLATFORM) -f ./build/ui/Dockerfile -t $(UI_IMAGE):$(VERSION) ./ui
 	@echo "Built $(UI_IMAGE):$(VERSION)"
 
 build-backup: ## Build backup image
 	@echo "Building $(BACKUP_IMAGE):$(VERSION) for $(PLATFORM)"
-	docker buildx build --platform $(PLATFORM) -f ./build/backup/Dockerfile -t $(BACKUP_IMAGE):$(VERSION) --load .
+	docker build --platform $(PLATFORM) -f ./build/backup/Dockerfile -t $(BACKUP_IMAGE):$(VERSION) .
 	@echo "Built $(BACKUP_IMAGE):$(VERSION)"
 
 build-all: build-api build-agent build-ui build-backup ## Build all images

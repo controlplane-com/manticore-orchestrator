@@ -52,16 +52,10 @@ type Config struct {
 	BackupContainer      string // Container name in the backup workload (default "backup")
 	ManticoreMySQLPort   string // Port for direct MySQL connections (default 9306)
 
-	// S3 configuration for indexer method
-	S3Bucket        string // S3 bucket for index uploads
-	S3Region        string // AWS region for S3
-	S3IndexPrefix   string // Path prefix for index uploads (default: "indexer-output")
-	S3Mount         string // Mount path agents use for S3 (default: "/mnt/s3")
-	IndexerWorkDir  string // Local temp directory for indexer builds (default: "/tmp/indexer")
-	IndexerMemLimit string // Memory limit for indexer (default: "2G")
-
-	// Shared volume configuration (alternative to S3 for indexer output)
-	SharedVolumeMount string // Mount path for shared volume (e.g., "/mnt/shared") - same path on cron and agents
+	// Indexer configuration
+	S3Mount           string // Mount path for source CSVs (e.g., "/mnt/s3" or "/mnt/data")
+	IndexerMemLimit   string // Memory limit for indexer (default: "2G")
+	SharedVolumeMount string // Shared volume mount path — same on cron and all agents; indexer output written here
 
 	// Backup storage configuration (for listing/restore)
 	BackupProvider string // "aws" or "gcp" - determines which SDK to use
@@ -176,14 +170,9 @@ func main() {
 		BackupWorkload:       getEnv("BACKUP_WORKLOAD", ""),
 		BackupContainer:      getEnv("BACKUP_CONTAINER_NAME", "backup"),
 		ManticoreMySQLPort:   getEnv("MANTICORE_MYSQL_PORT", "9306"),
-		// S3 configuration for indexer method
-		S3Bucket:        getEnv("S3_BUCKET", ""),
-		S3Region:        getEnv("S3_REGION", "us-east-1"),
-		S3IndexPrefix:   getEnv("S3_INDEX_PREFIX", "indexer-output"),
-		S3Mount:         getEnv("S3_MOUNT", "/mnt/s3"),
-		IndexerWorkDir:  getEnv("INDEXER_WORK_DIR", "/tmp/indexer"),
-		IndexerMemLimit: getEnv("INDEXER_MEM_LIMIT", "2G"),
-		// Shared volume configuration (alternative to S3)
+		// Indexer configuration
+		S3Mount:           getEnv("S3_MOUNT", "/mnt/s3"),
+		IndexerMemLimit:   getEnv("INDEXER_MEM_LIMIT", "2G"),
 		SharedVolumeMount: getEnv("SHARED_VOLUME_MOUNT", ""),
 		// Backup storage configuration
 		BackupProvider: getEnv("BACKUP_PROVIDER", "aws"),
@@ -2605,28 +2594,11 @@ func runCLI(config Config) {
 
 	clients := buildClientsStatic(config, replicaCount)
 
-	// Initialize S3 client and indexer builder if S3 bucket is configured (for indexer method)
-	// Initialize S3 client if S3 bucket is configured
-	var s3Client *s3.Client
-	if config.S3Bucket != "" {
-		var err error
-		s3Client, err = s3.NewClient(config.S3Bucket, config.S3Region)
-		if err != nil {
-			slog.Warn("failed to create S3 client", "error", err)
-		} else {
-			slog.Debug("S3 client initialized", "bucket", config.S3Bucket)
-		}
-	}
-
-	// Initialize indexer builder if either S3 or shared volume is configured
+	// Initialize indexer builder if shared volume is configured
 	var indexerBuilder *indexer.IndexBuilder
-	if s3Client != nil || config.SharedVolumeMount != "" {
-		indexerBuilder = indexer.NewIndexBuilder(config.IndexerWorkDir)
-		if config.SharedVolumeMount != "" {
-			slog.Debug("indexer builder initialized with shared volume", "sharedVolume", config.SharedVolumeMount)
-		} else {
-			slog.Debug("indexer builder initialized with S3", "workDir", config.IndexerWorkDir)
-		}
+	if config.SharedVolumeMount != "" {
+		indexerBuilder = indexer.NewIndexBuilder("")
+		slog.Debug("indexer builder initialized", "sharedVolume", config.SharedVolumeMount)
 	}
 
 	ctx := &actions2.Context{
@@ -2634,11 +2606,8 @@ func runCLI(config Config) {
 		Dataset:           tableName,
 		CSVPath:           csvPath,
 		CSVPaths:          csvPaths,
-		S3Client:          s3Client,
 		IndexerBuilder:    indexerBuilder,
-		S3IndexPrefix:     config.S3IndexPrefix,
 		S3Mount:           config.S3Mount,
-		IndexerWorkDir:    config.IndexerWorkDir,
 		ImportMemLimit:    config.IndexerMemLimit,
 		SharedVolumeMount: config.SharedVolumeMount,
 	}

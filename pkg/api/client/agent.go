@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/schema"
@@ -198,6 +197,11 @@ func (c *AgentClient) HealthProbe() (*types.HealthResponse, error) {
 // WaitForHealth polls the agent health endpoint until it responds successfully or the timeout expires.
 // Used to wait for an agent to recover after a pod restart.
 func (c *AgentClient) WaitForHealth(ctx context.Context, timeout time.Duration) error {
+	// Check immediately first — if already healthy, return without any delay.
+	if _, err := c.HealthProbe(); err == nil {
+		return nil
+	}
+
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(RestartHealthPollInterval)
 	defer ticker.Stop()
@@ -335,10 +339,8 @@ func (c *AgentClient) ClusterRejoin(sourceAddr string, maxRetries int) error {
 type ImportConfig struct {
 	PollInterval      time.Duration
 	PollTimeout       time.Duration
-	Resume            bool
-	Method            types.ImportMethod // Import method (bulk or indexer)
-	MemLimit          string             // Memory limit for indexer (e.g., "2G", "4G")
-	PrebuiltIndexPath string             // Path to pre-built index on S3 mount (for indexer method)
+	MemLimit          string // Memory limit for indexer (e.g., "2G", "4G")
+	PrebuiltIndexPath string // Path to pre-built index on S3 mount
 }
 
 // DefaultImportConfig returns default import configuration
@@ -363,16 +365,6 @@ func ImportConfigFromEnv() ImportConfig {
 		if d, err := time.ParseDuration(timeout); err == nil {
 			config.PollTimeout = d
 		}
-	}
-
-	if resume := os.Getenv("IMPORT_RESUME"); resume != "" {
-		if r, err := strconv.ParseBool(resume); err == nil {
-			config.Resume = r
-		}
-	}
-
-	if method := os.Getenv("IMPORT_METHOD"); method != "" {
-		config.Method = types.ImportMethod(method)
 	}
 
 	if memLimit := os.Getenv("IMPORT_MEM_LIMIT"); memLimit != "" {
@@ -416,17 +408,15 @@ func (c *AgentClient) CancelImport(jobID string, maxRetries int) error {
 	return err
 }
 
-// Import performs an async import with context support for cancellation.
+// RunImport starts an import job and blocks until it completes, polling for status.
 // Includes restart resilience: if the agent becomes unreachable (e.g. pod restart),
 // waits up to 5 minutes for recovery and re-submits the import.
-func (c *AgentClient) Import(ctx context.Context, table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
+func (c *AgentClient) RunImport(ctx context.Context, table, csvPath, cluster string, maxRetries int, config ImportConfig) error {
 	// Build import request from config
 	req := types.ImportRequest{
 		Table:             table,
 		CSVPath:           csvPath,
 		Cluster:           cluster,
-		Resume:            config.Resume,
-		Method:            config.Method,
 		MemLimit:          config.MemLimit,
 		PrebuiltIndexPath: config.PrebuiltIndexPath,
 	}
@@ -448,7 +438,7 @@ func (c *AgentClient) Import(ctx context.Context, table, csvPath, cluster string
 		slog.Info("StartImport succeeded after agent recovery", "table", table, "baseURL", c.baseURL)
 	}
 
-	slog.Debug("import job started", "jobId", jobID, "table", table, "method", config.Method)
+	slog.Debug("import job started", "jobId", jobID, "table", table)
 
 	// Poll for completion with restart recovery
 	deadline := time.Now().Add(config.PollTimeout)
@@ -556,7 +546,6 @@ type TableConfigColumn struct {
 // TableConfigResponse represents table behavior configuration from the agent
 type TableConfigResponse struct {
 	Table           string              `json:"table"`
-	ImportMethod    string              `json:"importMethod"`
 	ClusterMain     bool                `json:"clusterMain"`
 	HAStrategy      string              `json:"haStrategy"`
 	AgentRetryCount int                 `json:"agentRetryCount"`

@@ -194,7 +194,7 @@ func TestNewHandler(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
 	// We can't create a real Client without a database, but we can test the constructor logic
 	// by checking it doesn't panic and returns non-nil
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	if h == nil {
 		t.Fatal("NewHandler() returned nil")
@@ -204,12 +204,6 @@ func TestNewHandler(t *testing.T) {
 	}
 	if h.s3Mount != "/mnt/s3" {
 		t.Errorf("s3Mount = %q, want '/mnt/s3'", h.s3Mount)
-	}
-	if h.batchSize != 1000 {
-		t.Errorf("batchSize = %d, want 1000", h.batchSize)
-	}
-	if h.importWorkers != 4 {
-		t.Errorf("importWorkers = %d, want 4", h.importWorkers)
 	}
 }
 
@@ -278,7 +272,7 @@ func TestSuccessResponse(t *testing.T) {
 // Request body validation tests
 func TestCreateTableRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/table/create", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -298,7 +292,7 @@ func TestCreateTableRequest_InvalidBody(t *testing.T) {
 
 func TestCreateTableRequest_EmptyTable(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"table": ""}`
 	req := httptest.NewRequest("POST", "/api/table/create", bytes.NewBufferString(body))
@@ -319,7 +313,7 @@ func TestCreateTableRequest_EmptyTable(t *testing.T) {
 
 func TestCreateTableRequest_NoSchema(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"table": "unknown_table"}`
 	req := httptest.NewRequest("POST", "/api/table/create", bytes.NewBufferString(body))
@@ -340,7 +334,7 @@ func TestCreateTableRequest_NoSchema(t *testing.T) {
 
 func TestDropTableRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/table/drop", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -354,7 +348,7 @@ func TestDropTableRequest_InvalidBody(t *testing.T) {
 
 func TestDropTableRequest_EmptyTable(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"table": ""}`
 	req := httptest.NewRequest("POST", "/api/table/drop", bytes.NewBufferString(body))
@@ -369,7 +363,7 @@ func TestDropTableRequest_EmptyTable(t *testing.T) {
 
 func TestClusterJoinRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/cluster/join", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -383,7 +377,7 @@ func TestClusterJoinRequest_InvalidBody(t *testing.T) {
 
 func TestClusterJoinRequest_EmptySourceAddr(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"sourceAddr": ""}`
 	req := httptest.NewRequest("POST", "/api/cluster/join", bytes.NewBufferString(body))
@@ -404,7 +398,7 @@ func TestClusterJoinRequest_EmptySourceAddr(t *testing.T) {
 
 func TestClusterRejoinRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/cluster/rejoin", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -418,7 +412,7 @@ func TestClusterRejoinRequest_InvalidBody(t *testing.T) {
 
 func TestClusterRejoinRequest_EmptySourceAddr(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"sourceAddr": ""}`
 	req := httptest.NewRequest("POST", "/api/cluster/rejoin", bytes.NewBufferString(body))
@@ -433,7 +427,7 @@ func TestClusterRejoinRequest_EmptySourceAddr(t *testing.T) {
 
 func TestAlterDistributedRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/distributed/alter", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -447,7 +441,7 @@ func TestAlterDistributedRequest_InvalidBody(t *testing.T) {
 
 func TestAlterDistributedRequest_MissingFields(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	tests := []struct {
 		name string
@@ -474,7 +468,7 @@ func TestAlterDistributedRequest_MissingFields(t *testing.T) {
 
 func TestCreateDistributedRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/distributed/create", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -488,7 +482,7 @@ func TestCreateDistributedRequest_InvalidBody(t *testing.T) {
 
 func TestCreateDistributedRequest_MissingFields(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	tests := []struct {
 		name string
@@ -514,7 +508,7 @@ func TestCreateDistributedRequest_MissingFields(t *testing.T) {
 
 func TestClusterAddRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/cluster/add", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -528,7 +522,7 @@ func TestClusterAddRequest_InvalidBody(t *testing.T) {
 
 func TestClusterAddRequest_EmptyTable(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"table": ""}`
 	req := httptest.NewRequest("POST", "/api/cluster/add", bytes.NewBufferString(body))
@@ -543,7 +537,7 @@ func TestClusterAddRequest_EmptyTable(t *testing.T) {
 
 func TestClusterDropRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/cluster/drop", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -557,7 +551,7 @@ func TestClusterDropRequest_InvalidBody(t *testing.T) {
 
 func TestClusterDropRequest_EmptyTable(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	body := `{"table": ""}`
 	req := httptest.NewRequest("POST", "/api/cluster/drop", bytes.NewBufferString(body))
@@ -572,7 +566,7 @@ func TestClusterDropRequest_EmptyTable(t *testing.T) {
 
 func TestImportRequest_InvalidBody(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	req := httptest.NewRequest("POST", "/api/import", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
@@ -586,7 +580,7 @@ func TestImportRequest_InvalidBody(t *testing.T) {
 
 func TestImportRequest_MissingFields(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
 	tests := []struct {
 		name string
@@ -613,9 +607,9 @@ func TestImportRequest_MissingFields(t *testing.T) {
 
 func TestImportRequest_NoSchema(t *testing.T) {
 	registry := manticore.NewSchemaRegistry()
-	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", 1000, 4, nil)
+	h := NewHandler(nil, registry, "test-cluster", "/mnt/s3", nil)
 
-	body := `{"table": "unknown_table", "csvPath": "/path/to/file.csv"}`
+	body := `{"table": "unknown_table", "prebuiltIndexPath": "/mnt/s3/index/unknown_table"}`
 	req := httptest.NewRequest("POST", "/api/import", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 

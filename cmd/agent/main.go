@@ -79,8 +79,6 @@ func main() {
 	listenAddr := getEnv("LISTEN_ADDR", ":8080")
 	authToken := getEnv("AUTH_TOKEN", "")
 	orchestratorURL := getEnv("ORCHESTRATOR_API_URL", "") // e.g., "http://orchestrator:8080"
-	importBatchSize := getEnvInt("IMPORT_BATCH_SIZE", 10000)
-	importWorkers := getEnvInt("IMPORT_WORKERS", 4)
 	initDelaySeconds := getEnvInt("INIT_DELAY_SECONDS", 30)
 
 	if authToken == "" {
@@ -141,7 +139,7 @@ func main() {
 	defer jobManager.Stop()
 
 	// Create handler with dependencies
-	h = handlers.NewHandler(client, registry, clusterName, s3Mount, importBatchSize, importWorkers, jobManager)
+	h = handlers.NewHandler(client, registry, clusterName, s3Mount, jobManager)
 
 	// Setup routes
 	r := mux.NewRouter()

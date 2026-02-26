@@ -1,13 +1,18 @@
 package actions
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
-	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/s3"
 )
+
+// IndexBuilder is the interface for building Manticore RT indexes from source data
+type IndexBuilder interface {
+	Build(ctx context.Context, cfg *indexer.Config) (*indexer.BuildResult, error)
+}
 
 // Context holds the execution context for actions
 type Context struct {
@@ -20,17 +25,11 @@ type Context struct {
 	CSVPaths     []string // one CSV path per segment; CSVPath = CSVPaths[0] when set
 	SegmentCount int      // number of segments (1 = single-segment, current behavior)
 
-	// Indexer-related configuration (only used when importMethod is "indexer")
-	S3Client       *s3.Client            // S3 client for uploading indexes (nil for shared volume mode)
-	IndexerBuilder *indexer.IndexBuilder // Indexer for building indexes locally
-	S3IndexPrefix  string                // S3 prefix for index uploads (e.g., "indexer-output")
-	S3Mount        string                // Mount path agents use for S3 (e.g., "/mnt/s3")
-	IndexerWorkDir string                // Local temp directory for indexer builds
-	ImportMemLimit string                // Memory limit for indexer (e.g., "2G")
-
-	// Shared volume configuration (alternative to S3 for indexer output)
-	// When SharedVolumeMount is set, indexer writes directly to shared volume and skips S3 upload
-	SharedVolumeMount string // Mount path for shared volume (e.g., "/mnt/shared") - same path on cron and agents
+	// Indexer-related configuration
+	IndexerBuilder    IndexBuilder // Indexer for building RT indexes from source CSVs
+	S3Mount           string      // Mount path for source CSVs (e.g., "/mnt/s3" or "/mnt/data")
+	ImportMemLimit    string      // Memory limit for indexer (e.g., "2G")
+	SharedVolumeMount string      // Shared volume mount path — same path on cron and all agents; indexer output written here
 }
 
 // MainTableName returns the main table name for a given slot

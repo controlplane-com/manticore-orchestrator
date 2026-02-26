@@ -10,8 +10,19 @@ import (
 	"testing"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
+	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
+
+// mockIndexBuilder is a no-op IndexBuilder for tests that skips actual index building
+type mockIndexBuilder struct{ err error }
+
+func (m *mockIndexBuilder) Build(_ context.Context, cfg *indexer.Config) (*indexer.BuildResult, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &indexer.BuildResult{IndexPath: "/tmp/mock-index/" + cfg.TableName, RowCount: 100}, nil
+}
 
 // mockImportServer creates a test server that simulates agent responses for import operations
 // It handles health checks (for slot discovery) and tracks table state
@@ -61,6 +72,13 @@ func mockImportServer(t *testing.T, existingTables []string) *httptest.Server {
 
 		case "/api/import":
 			if r.Method == "POST" {
+				var req struct {
+					Table string `json:"table"`
+				}
+				json.NewDecoder(r.Body).Decode(&req)
+				if req.Table != "" {
+					tables[req.Table] = true
+				}
 				// Start async import - return job ID
 				w.WriteHeader(http.StatusAccepted)
 				w.Write([]byte(`{"jobId":"test-job-123"}`))
@@ -98,7 +116,7 @@ func mockImportServer(t *testing.T, existingTables []string) *httptest.Server {
 			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 				json.NewEncoder(w).Encode(client.TableConfigResponse{
 					Table:        "products",
-					ImportMethod: "bulk",
+					
 					ClusterMain:  true,
 				})
 				return
@@ -116,15 +134,19 @@ func mockImportServer(t *testing.T, existingTables []string) *httptest.Server {
 func TestImport_SlotSwapFromAToB(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("REPLICATION_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Start with products_main_a existing (slot A is current)
 	server := mockImportServer(t, []string{"products_main_a", "products_delta"})
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
@@ -160,15 +182,19 @@ func TestImport_SlotSwapFromAToB(t *testing.T) {
 func TestImport_SlotSwapFromBToA(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("REPLICATION_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Start with products_main_b existing (slot B is current)
 	server := mockImportServer(t, []string{"products_main_b", "products_delta"})
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
@@ -204,15 +230,19 @@ func TestImport_SlotSwapFromBToA(t *testing.T) {
 func TestImport_DefaultsToSlotAWhenNoMainTableExists(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("REPLICATION_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Start with no main tables - should detect default slot "a" and create "b"
 	server := mockImportServer(t, []string{"products_delta"})
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
@@ -254,6 +284,8 @@ func TestImport_NoClients(t *testing.T) {
 func TestImport_MultipleReplicas(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("REPLICATION_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Track which replicas received AlterDistributed calls
 	var alterCalls []int
@@ -312,15 +344,26 @@ func TestImport_MultipleReplicas(t *testing.T) {
 				mu.Unlock()
 				w.Write([]byte(`{"status":"ok"}`))
 			case "/api/import":
-				// Start async import - return job ID
-				w.WriteHeader(http.StatusAccepted)
-				w.Write([]byte(`{"jobId":"test-job-multi"}`))
+				if r.Method == "POST" {
+					var req struct {
+						Table string `json:"table"`
+					}
+					json.NewDecoder(r.Body).Decode(&req)
+					mu.Lock()
+					if req.Table != "" {
+						tables[req.Table] = true
+					}
+					mu.Unlock()
+					// Start async import - return job ID
+					w.WriteHeader(http.StatusAccepted)
+					w.Write([]byte(`{"jobId":"test-job-multi"}`))
+				}
 			default:
 				// Handle /api/tables/{name}/config pattern for table config
 				if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 					json.NewEncoder(w).Encode(client.TableConfigResponse{
 						Table:        "products",
-						ImportMethod: "bulk",
+						
 						ClusterMain:  true,
 					})
 					return
@@ -342,9 +385,11 @@ func TestImport_MultipleReplicas(t *testing.T) {
 	}
 
 	ctx := &Context{
-		Clients: clients,
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           clients,
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
@@ -361,9 +406,11 @@ func TestImport_MultipleReplicas(t *testing.T) {
 func TestImport_MainTableNames(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("REPLICATION_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Test that correct table names are used based on discovered slot
-	var createTableCalls []string
+	var importTableCalls []string
 	var mu sync.Mutex
 	tables := map[string]bool{"mydata_main_a": true} // Start with slot A
 
@@ -388,16 +435,6 @@ func TestImport_MainTableNames(t *testing.T) {
 				ClusterStatus: "primary",
 				NodeState:     "synced",
 			})
-		case "/api/table/create":
-			var req struct {
-				Table string `json:"table"`
-			}
-			json.NewDecoder(r.Body).Decode(&req)
-			mu.Lock()
-			createTableCalls = append(createTableCalls, req.Table)
-			tables[req.Table] = true
-			mu.Unlock()
-			w.Write([]byte(`{"status":"ok"}`))
 		case "/api/tables":
 			mu.Lock()
 			var tableList []types.TableInfo
@@ -412,15 +449,27 @@ func TestImport_MainTableNames(t *testing.T) {
 			mu.Unlock()
 			json.NewEncoder(w).Encode(types.TablesResponse{Tables: tableList})
 		case "/api/import":
-			// Start async import - return job ID
-			w.WriteHeader(http.StatusAccepted)
-			w.Write([]byte(`{"jobId":"test-job-main"}`))
+			if r.Method == "POST" {
+				var req struct {
+					Table string `json:"table"`
+				}
+				json.NewDecoder(r.Body).Decode(&req)
+				mu.Lock()
+				importTableCalls = append(importTableCalls, req.Table)
+				if req.Table != "" {
+					tables[req.Table] = true
+				}
+				mu.Unlock()
+				// Start async import - return job ID
+				w.WriteHeader(http.StatusAccepted)
+				w.Write([]byte(`{"jobId":"test-job-main"}`))
+			}
 		default:
 			// Handle /api/tables/{name}/config pattern for table config
 			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 				json.NewEncoder(w).Encode(client.TableConfigResponse{
 					Table:        "mydata",
-					ImportMethod: "bulk",
+					
 					ClusterMain:  true,
 				})
 				return
@@ -436,9 +485,11 @@ func TestImport_MainTableNames(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "mydata",
-		CSVPath: "/data/mydata.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "mydata",
+		CSVPath:           "/data/mydata.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
@@ -446,16 +497,16 @@ func TestImport_MainTableNames(t *testing.T) {
 		t.Fatalf("Import() error: %v", err)
 	}
 
-	// Since we're on slot a, import should create slot b table
+	// Since we're on slot a, import should target the slot b table
 	found := false
-	for _, name := range createTableCalls {
+	for _, name := range importTableCalls {
 		if name == "mydata_main_b" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("Expected mydata_main_b to be created, got calls: %v", createTableCalls)
+		t.Errorf("Expected import for mydata_main_b, got calls: %v", importTableCalls)
 	}
 }
 
@@ -515,11 +566,11 @@ func TestWaitForReplication_ContextCancellation(t *testing.T) {
 func TestImport_CleanupOnImportFailure(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Track cleanup operations
 	var mu sync.Mutex
 	tables := map[string]bool{"products_main_a": true, "products_delta": true}
-	var clusterDropCalls []string
 	var tableDropCalls []string
 
 	// Helper to discover slot based on which main table exists
@@ -555,15 +606,7 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 			tables[req.Table] = true
 			w.Write([]byte(`{"status":"ok"}`))
 
-		case "/api/cluster/add":
-			w.Write([]byte(`{"status":"ok"}`))
-
-		case "/api/cluster/drop":
-			var req struct {
-				Table string `json:"table"`
-			}
-			json.NewDecoder(r.Body).Decode(&req)
-			clusterDropCalls = append(clusterDropCalls, req.Table)
+		case "/api/cluster/add", "/api/cluster/drop":
 			w.Write([]byte(`{"status":"ok"}`))
 
 		case "/api/table/drop":
@@ -598,9 +641,8 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 			// Handle /api/tables/{name}/config pattern for table config
 			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 				json.NewEncoder(w).Encode(client.TableConfigResponse{
-					Table:        "products",
-					ImportMethod: "bulk",
-					ClusterMain:  true,
+					Table:       "products",
+					ClusterMain: true,
 				})
 				return
 			}
@@ -615,9 +657,11 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
@@ -625,23 +669,7 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 		t.Fatal("Import() should return error when import fails")
 	}
 
-	// Verify cleanup was called - ClusterDrop should be called for the new table
-	if len(clusterDropCalls) == 0 {
-		t.Error("ClusterDrop should have been called during cleanup")
-	} else {
-		found := false
-		for _, table := range clusterDropCalls {
-			if table == "products_main_b" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("ClusterDrop should have been called for products_main_b, got: %v", clusterDropCalls)
-		}
-	}
-
-	// Verify table was dropped
+	// Verify table was dropped during cleanup
 	if len(tableDropCalls) == 0 {
 		t.Error("DropTable should have been called during cleanup")
 	} else {
@@ -661,11 +689,11 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 func TestImport_CleanupOnContextCancellation(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Track cleanup operations
 	var mu sync.Mutex
 	tables := map[string]bool{"products_main_a": true, "products_delta": true}
-	var clusterDropCalls []string
 	var tableDropCalls []string
 	var importCancelCalls []string
 	importStarted := make(chan struct{})
@@ -703,15 +731,7 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 			tables[req.Table] = true
 			w.Write([]byte(`{"status":"ok"}`))
 
-		case "/api/cluster/add":
-			w.Write([]byte(`{"status":"ok"}`))
-
-		case "/api/cluster/drop":
-			var req struct {
-				Table string `json:"table"`
-			}
-			json.NewDecoder(r.Body).Decode(&req)
-			clusterDropCalls = append(clusterDropCalls, req.Table)
+		case "/api/cluster/add", "/api/cluster/drop":
 			w.Write([]byte(`{"status":"ok"}`))
 
 		case "/api/table/drop":
@@ -751,9 +771,8 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 			// Handle /api/tables/{name}/config pattern for table config
 			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 				json.NewEncoder(w).Encode(client.TableConfigResponse{
-					Table:        "products",
-					ImportMethod: "bulk",
-					ClusterMain:  true,
+					Table:       "products",
+					ClusterMain: true,
 				})
 				return
 			}
@@ -775,9 +794,11 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	// Create a cancellable context
@@ -807,28 +828,25 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 		t.Error("CancelImport should have been called on the agent")
 	}
 
-	// Verify cleanup was called
+	// Verify table was dropped during cleanup
 	mu.Lock()
-	clusterDropCount := len(clusterDropCalls)
 	tableDropCount := len(tableDropCalls)
 	mu.Unlock()
 
-	if clusterDropCount == 0 {
-		t.Error("ClusterDrop should have been called during cleanup")
-	}
 	if tableDropCount == 0 {
 		t.Error("DropTable should have been called during cleanup")
 	}
 }
 
-func TestImport_NoCleanupBeforeClusterAdd(t *testing.T) {
-	// Use short poll interval to speed up test
+func TestImport_NoClusterDropOnFailure(t *testing.T) {
+	// Verify that a failed import never triggers ClusterDrop — cluster management
+	// is handled internally by the agent and the orchestrator never calls ClusterDrop
+	// on the new table.
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
-	// Track cleanup operations
 	var mu sync.Mutex
 	var clusterDropCalls []string
-	var tableDropCalls []string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -844,11 +862,6 @@ func TestImport_NoCleanupBeforeClusterAdd(t *testing.T) {
 				NodeState:     "synced",
 			})
 
-		case "/api/table/create":
-			// Fail table creation - before ClusterAdd
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"simulated create failure"}`))
-
 		case "/api/cluster/drop":
 			var req struct {
 				Table string `json:"table"`
@@ -858,26 +871,33 @@ func TestImport_NoCleanupBeforeClusterAdd(t *testing.T) {
 			w.Write([]byte(`{"status":"ok"}`))
 
 		case "/api/table/drop":
-			var req struct {
-				Table string `json:"table"`
-			}
-			json.NewDecoder(r.Body).Decode(&req)
-			tableDropCalls = append(tableDropCalls, req.Table)
 			w.Write([]byte(`{"status":"ok"}`))
+
+		case "/api/import":
+			if r.Method == "POST" {
+				w.WriteHeader(http.StatusAccepted)
+				w.Write([]byte(`{"jobId":"test-job-no-cluster-drop"}`))
+			}
 
 		case "/api/tables":
 			json.NewEncoder(w).Encode(types.TablesResponse{
-				Tables: []types.TableInfo{{Name: "products_main_a"}},
+				Tables: []types.TableInfo{
+					{Name: "products", Slot: "a"},
+					{Name: "products_main_a"},
+				},
 			})
 
 		default:
-			// Handle /api/tables/{name}/config pattern for table config
 			if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 				json.NewEncoder(w).Encode(client.TableConfigResponse{
-					Table:        "products",
-					ImportMethod: "bulk",
-					ClusterMain:  true,
+					Table:       "products",
+					ClusterMain: true,
 				})
+				return
+			}
+			// Return failed status for import polling
+			if strings.HasPrefix(r.URL.Path, "/api/import/") && r.Method == "GET" {
+				w.Write([]byte(`{"job":{"id":"test-job-no-cluster-drop","status":"failed","error":"simulated failure"}}`))
 				return
 			}
 			w.Write([]byte(`{"status":"ok"}`))
@@ -886,33 +906,33 @@ func TestImport_NoCleanupBeforeClusterAdd(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients: []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)
 	if err == nil {
-		t.Fatal("Import() should return error when create table fails")
+		t.Fatal("Import() should return error when import fails")
 	}
 
-	// Verify NO cleanup was called (failure was before ClusterAdd)
+	// Verify ClusterDrop was never called — the orchestrator does not manage cluster
+	// membership for the new table; the agent handles this internally.
 	mu.Lock()
 	clusterDropCount := len(clusterDropCalls)
-	tableDropCount := len(tableDropCalls)
 	mu.Unlock()
 
 	if clusterDropCount > 0 {
-		t.Errorf("ClusterDrop should NOT have been called before ClusterAdd succeeds, got: %v", clusterDropCalls)
-	}
-	if tableDropCount > 0 {
-		t.Errorf("DropTable should NOT have been called before ClusterAdd succeeds, got: %v", tableDropCalls)
+		t.Errorf("ClusterDrop should NOT have been called, got: %v", clusterDropCalls)
 	}
 }
 
 func TestImport_CleanupOnMultipleReplicas(t *testing.T) {
 	// Use short poll interval to speed up test
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
+	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
 	// Track cleanup operations across multiple replicas
 	var mu sync.Mutex
@@ -969,6 +989,13 @@ func TestImport_CleanupOnMultipleReplicas(t *testing.T) {
 
 			case "/api/import":
 				if r.Method == "POST" {
+					var req struct {
+						Table string `json:"table"`
+					}
+					json.NewDecoder(r.Body).Decode(&req)
+					if req.Table != "" {
+						tables[req.Table] = true
+					}
 					w.WriteHeader(http.StatusAccepted)
 					w.Write([]byte(`{"jobId":"test-job-multi-cleanup"}`))
 				}
@@ -990,7 +1017,7 @@ func TestImport_CleanupOnMultipleReplicas(t *testing.T) {
 				if strings.HasPrefix(r.URL.Path, "/api/tables/") && strings.HasSuffix(r.URL.Path, "/config") {
 					json.NewEncoder(w).Encode(client.TableConfigResponse{
 						Table:        "products",
-						ImportMethod: "bulk",
+						
 						ClusterMain:  true,
 					})
 					return
@@ -1012,9 +1039,11 @@ func TestImport_CleanupOnMultipleReplicas(t *testing.T) {
 	}
 
 	ctx := &Context{
-		Clients: clients,
-		Dataset: "products",
-		CSVPath: "/data/products.csv",
+		Clients:           clients,
+		Dataset:           "products",
+		CSVPath:           "/data/products.csv",
+		IndexerBuilder:    &mockIndexBuilder{},
+		SharedVolumeMount: t.TempDir(),
 	}
 
 	err := Import(context.Background(), ctx)

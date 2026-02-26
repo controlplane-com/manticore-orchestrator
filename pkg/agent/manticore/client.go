@@ -1,7 +1,6 @@
 package manticore
 
 import (
-	"bytes"
 	"database/sql"
 	"fmt"
 	"io"
@@ -63,32 +62,6 @@ func (c *Client) Port() string {
 // HTTPPort returns the HTTP API port
 func (c *Client) HTTPPort() string {
 	return c.httpPort
-}
-
-// BulkInsert sends NDJSON to Manticore's bulk HTTP API endpoint.
-// The ndjson parameter should be newline-delimited JSON with one operation per line.
-// Example: {"insert":{"index":"table","id":1,"doc":{"field":"value"}}}
-func (c *Client) BulkInsert(ndjson string) error {
-	url := fmt.Sprintf("http://%s:%s/bulk", c.host, c.httpPort)
-
-	req, err := http.NewRequest("POST", url, bytes.NewBufferString(ndjson))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-ndjson")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("bulk request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("bulk insert failed: %s - %s", resp.Status, string(body))
-	}
-
-	return nil
 }
 
 // Execute runs a SQL statement

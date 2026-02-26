@@ -495,7 +495,6 @@ func stepCreateTables(ctx *initContext) error {
 		if err != nil {
 			slog.Warn("failed to fetch table config, using defaults", "table", table.Name, "error", err)
 			tableConfig = &client.TableConfigResponse{
-				ImportMethod:    "bulk",
 				ClusterMain:     true,
 				HAStrategy:      "nodeads",
 				AgentRetryCount: 0,
