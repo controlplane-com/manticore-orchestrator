@@ -64,20 +64,17 @@ func NewManager(jobsDir string) (*Manager, error) {
 }
 
 // CreateJob creates a new pending job and persists it
-func (m *Manager) CreateJob(table, csvPath, cluster string, method types.ImportMethod, memLimit, prebuiltIndexPath string, workers, batchSize int) (*types.ImportJob, error) {
+func (m *Manager) CreateJob(table, csvPath, cluster, memLimit, prebuiltIndexPath string) (*types.ImportJob, error) {
 	now := time.Now().Unix()
 	job := &types.ImportJob{
 		ID:                uuid.New().String(),
 		Table:             table,
 		CSVPath:           csvPath,
 		Cluster:           cluster,
-		Method:            method,
 		MemLimit:          memLimit,
 		PrebuiltIndexPath: prebuiltIndexPath,
 		Status:            types.ImportJobStatusPending,
 		StartedAt:         &now,
-		Workers:           workers,
-		BatchSize:         batchSize,
 	}
 
 	m.mu.Lock()
@@ -93,7 +90,7 @@ func (m *Manager) CreateJob(table, csvPath, cluster string, method types.ImportM
 	}
 
 	slog.Info("created import job", "jobId", job.ID, "table", table, "csvPath", csvPath,
-		"cluster", cluster, "method", method, "memLimit", memLimit, "prebuiltIndexPath", prebuiltIndexPath, "workers", workers, "batchSize", batchSize)
+		"cluster", cluster, "memLimit", memLimit, "prebuiltIndexPath", prebuiltIndexPath)
 	return job, nil
 }
 
@@ -143,58 +140,6 @@ func (m *Manager) SetJobCancelFunc(id string, cancel context.CancelFunc) {
 	if state, ok := m.jobs[id]; ok {
 		state.cancel = cancel
 	}
-}
-
-// UpdateJob updates a job's fields and persists to disk
-func (m *Manager) UpdateJob(job *types.ImportJob) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state, ok := m.jobs[job.ID]
-	if !ok {
-		return fmt.Errorf("job not found: %s", job.ID)
-	}
-
-	// Update the job in state
-	state.job = job
-	return m.persistJobLocked(job)
-}
-
-// FindJobByTableAndPath finds the most recent job for a table and CSV path
-func (m *Manager) FindJobByTableAndPath(table, csvPath string) *types.ImportJob {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var mostRecent *types.ImportJob
-	var mostRecentTime int64
-
-	for _, state := range m.jobs {
-		if state.job.Table == table && state.job.CSVPath == csvPath {
-			if state.job.StartedAt != nil && *state.job.StartedAt > mostRecentTime {
-				mostRecentTime = *state.job.StartedAt
-				jobCopy := *state.job
-				mostRecent = &jobCopy
-			}
-		}
-	}
-
-	return mostRecent
-}
-
-// GetInterruptedJobs returns jobs that were interrupted by a restart (failed with checkpoint data)
-func (m *Manager) GetInterruptedJobs() []*types.ImportJob {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var interrupted []*types.ImportJob
-	for _, state := range m.jobs {
-		if state.job.Status == types.ImportJobStatusFailed &&
-			state.job.Error == "agent restarted during import (can resume from checkpoint)" {
-			jobCopy := *state.job
-			interrupted = append(interrupted, &jobCopy)
-		}
-	}
-	return interrupted
 }
 
 // CancelJob cancels a running job by calling its cancel function
@@ -275,19 +220,17 @@ func (m *Manager) loadFromDisk() error {
 			continue
 		}
 
-		// Mark running/pending jobs as failed (worker pool died during restart)
-		// These jobs can be resumed using the lastLineNum checkpoint
+		// Mark running/pending jobs as failed (interrupted by agent restart)
 		if job.Status == types.ImportJobStatusRunning ||
 			job.Status == types.ImportJobStatusPending {
 			job.Status = types.ImportJobStatusFailed
-			job.Error = "agent restarted during import (can resume from checkpoint)"
+			job.Error = "agent restarted during import"
 			now := time.Now().Unix()
 			job.EndedAt = &now
 			// Re-persist the updated status
 			data, _ := json.MarshalIndent(&job, "", "  ")
 			os.WriteFile(path, data, 0644)
-			slog.Info("marked interrupted job as failed", "jobId", job.ID,
-				"lastLineNum", job.LastLineNum, "error", job.Error)
+			slog.Info("marked interrupted job as failed", "jobId", job.ID, "error", job.Error)
 		}
 
 		m.jobs[job.ID] = &jobState{job: &job}

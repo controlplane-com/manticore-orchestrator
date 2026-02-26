@@ -1,8 +1,3 @@
-//TODO: ask Claude to review the following
-// 1. Function names in the api code and the agent code
-// 2. Unnecessary parameters, given that we're removing support for all import methods other than the "indexer" method
-// 3. Any dead code after removing the other import methods
-
 package actions
 
 import (
@@ -16,7 +11,6 @@ import (
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/api/client"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/indexer"
-	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 	"github.com/google/uuid"
 )
 
@@ -34,18 +28,17 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Use replica-0 for cluster operations
 	primary := ctx.Clients[0]
 
-	// Fetch table config from agent to determine import method, clustering, and HA options
+	// Fetch table config from agent to determine clustering, HA options, and segment count
 	tableConfig, err := primary.GetTableConfig(ctx.Dataset, 1)
 	if err != nil {
 		slog.Warn("failed to fetch table config, using defaults", "table", ctx.Dataset, "error", err)
 		tableConfig = &client.TableConfigResponse{
-			ImportMethod:    "bulk",
 			ClusterMain:     true,
 			HAStrategy:      "nodeads",
 			AgentRetryCount: 0,
 		}
 	}
-	slog.Debug("table config", "table", ctx.Dataset, "importMethod", tableConfig.ImportMethod, "clusterMain", tableConfig.ClusterMain, "haStrategy", tableConfig.HAStrategy, "segmentCount", tableConfig.SegmentCount)
+	slog.Debug("table config", "table", ctx.Dataset, "clusterMain", tableConfig.ClusterMain, "haStrategy", tableConfig.HAStrategy, "segmentCount", tableConfig.SegmentCount)
 
 	// Apply segment count from agent config (overrides whatever was passed in ctx)
 	ctx.SegmentCount = tableConfig.SegmentCount
@@ -70,18 +63,9 @@ func Import(goCtx context.Context, ctx *Context) error {
 	distTable := ctx.DistributedTableName()
 	slog.Debug("import plan", "distTable", distTable, "newSlot", newSlot, "oldSlot", oldSlot, "segmentCount", ctx.SegmentCount, "clusterMain", tableConfig.ClusterMain)
 
-	// Track which segment main tables were added to the cluster so cleanup can remove them
-	clusterAddedTables := make([]string, 0, ctx.SegmentCount)
-
-	// cleanup removes all new segment main tables from cluster and drops them on all replicas
+	// cleanup drops all new segment main tables on all replicas
 	cleanup := func() {
 		slog.Info("cleaning up failed import", "dataset", ctx.Dataset, "newSlot", newSlot, "segmentCount", ctx.SegmentCount)
-
-		for _, t := range clusterAddedTables {
-			if err := primary.ClusterDrop(t, 0); err != nil {
-				slog.Error("failed to remove table from cluster during cleanup", "table", t, "error", err)
-			}
-		}
 
 		for seg := 1; seg <= ctx.SegmentCount; seg++ {
 			newMainTable := ctx.SegmentMainTableName(newSlot, seg)
@@ -93,33 +77,14 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
-	// Step 2-5: Create and import each segment sequentially, then replicate
 	importConfig := client.ImportConfigFromEnv()
-	importConfig.Method = types.ImportMethod(tableConfig.ImportMethod)
 
-	// Indexer method: loop over segments, build/upload/import each
+	// Loop over segments, build/upload/import each
 	for seg := 1; seg <= ctx.SegmentCount; seg++ {
 		newMainTable := ctx.SegmentMainTableName(newSlot, seg)
 		segCSVPath := ctx.csvPathForSegment(seg)
-		segCtx := &Context{
-			Clients:           ctx.Clients,
-			Dataset:           ctx.Dataset,
-			CSVPath:           segCSVPath,
-			CSVPaths:          []string{segCSVPath},
-			SegmentCount:      1, // single-segment context for the indexer helper
-			Cluster:           ctx.Cluster,
-			S3Client:          ctx.S3Client,
-			IndexerBuilder:    ctx.IndexerBuilder,
-			S3IndexPrefix:     ctx.S3IndexPrefix,
-			S3Mount:           ctx.S3Mount,
-			IndexerWorkDir:    ctx.IndexerWorkDir,
-			ImportMemLimit:    ctx.ImportMemLimit,
-			SharedVolumeMount: ctx.SharedVolumeMount,
-		}
 		slog.Info("importing segment (indexer)", "seg", seg, "table", newMainTable, "csv", segCSVPath)
-		//TODO: make importWithIndexer into a function which only converts the .csv/.tsv file into a RT table folder
-		// and change the name to something sensible
-		if err := importWithIndexer(goCtx, segCtx, newMainTable, tableConfig, primary, cleanup); err != nil {
+		if err := buildAndImportIndex(goCtx, ctx, segCSVPath, newMainTable, tableConfig, primary, cleanup); err != nil {
 			return err
 		}
 		if tableConfig.ClusterMain {
@@ -132,15 +97,12 @@ func Import(goCtx context.Context, ctx *Context) error {
 
 	// Step 5b: Verify table exists on all replicas before proceeding to ALTER DISTRIBUTED.
 	// After a replica restart, the table may not exist even if the import reported success
-	// (manticore can crash from I/O pressure right after completing IMPORT TABLE).
 	// If a table is missing, re-run the import on that specific replica.
 	for seg := 1; seg <= ctx.SegmentCount; seg++ {
 		segMainTable := ctx.SegmentMainTableName(newSlot, seg)
 		segCSVPath := ctx.csvPathForSegment(seg)
 		slog.Debug("verifying table exists on all replicas before swap", "table", segMainTable)
 		for i, c := range ctx.Clients {
-			//TODO: Create a single function that invokes the agent's Import method on a given replica, and verifies that it succeeded.
-			// If it did not succeed, retry. Call that function here for all replicas.
 			if err := ensureTableOnReplica(goCtx, c, i, segMainTable, segCSVPath, importConfig); err != nil {
 				cleanup()
 				return fmt.Errorf("table recovery failed before swap (seg %d): %w", seg, err)
@@ -198,17 +160,46 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
-	slog.Info("import completed successfully", "method", tableConfig.ImportMethod, "clustered", tableConfig.ClusterMain, "segments", ctx.SegmentCount)
+	slog.Info("import completed successfully", "clustered", tableConfig.ClusterMain, "segments", ctx.SegmentCount)
 	return nil
 }
 
-// waitForReplication waits for a table to be replicated to all nodes
+// sharedVolumeSyncDelay returns the delay to wait after writing index to shared volume.
+// Configurable via SHARED_VOLUME_SYNC_DELAY env var (e.g. "0s" for tests).
+func sharedVolumeSyncDelay() time.Duration {
+	if delay := os.Getenv("SHARED_VOLUME_SYNC_DELAY"); delay != "" {
+		if d, err := time.ParseDuration(delay); err == nil {
+			return d
+		}
+	}
+	return 10 * time.Second
+}
+
+// tableExistsOnClient returns true if the named table appears in the client's table list.
+func tableExistsOnClient(c *client.AgentClient, tableName string, retries int) (bool, error) {
+	tables, err := c.ListTables(retries)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range tables {
+		if t.Name == tableName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// waitForReplication waits for a table to be present on all replicas (Galera replication).
 func waitForReplication(goCtx context.Context, ctx *Context, table string) error {
 	maxAttempts := 30
 	pollInterval := 2 * time.Second
+	if d := os.Getenv("REPLICATION_POLL_INTERVAL"); d != "" {
+		if pd, err := time.ParseDuration(d); err == nil {
+			pollInterval = pd
+		}
+	}
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Check for context cancellation
 		select {
 		case <-goCtx.Done():
 			return goCtx.Err()
@@ -216,24 +207,12 @@ func waitForReplication(goCtx context.Context, ctx *Context, table string) error
 		}
 
 		allReady := true
-
 		for i, c := range ctx.Clients {
-			tables, err := c.ListTables(0)
+			exists, err := tableExistsOnClient(c, table, 0)
 			if err != nil {
-				slog.Debug("failed to list tables", "replica", i, "error", err)
+				slog.Debug("failed to list tables on replica", "replica", i, "error", err)
 				allReady = false
-				continue
-			}
-
-			found := false
-			for _, t := range tables {
-				if t.Name == table {
-					found = true
-					break
-				}
-			}
-
-			if !found {
+			} else if !exists {
 				slog.Debug("table not yet replicated", "replica", i, "table", table)
 				allReady = false
 			}
@@ -269,7 +248,7 @@ func ensureTableOnReplica(goCtx context.Context, c *client.AgentClient, replicaI
 		if createErr := c.CreateTable(table, 0); createErr != nil {
 			slog.Debug("CreateTable before re-import (may already exist)", "error", createErr)
 		}
-		if importErr := c.Import(goCtx, table, csvPath, "", 0, importConfig); importErr != nil {
+		if importErr := c.RunImport(goCtx, table, csvPath, "", 0, importConfig); importErr != nil {
 			return fmt.Errorf("re-import on replica %d failed: %w", replicaIdx, importErr)
 		}
 		if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
@@ -306,29 +285,17 @@ func verifyTableExists(goCtx context.Context, c *client.AgentClient, table strin
 		default:
 		}
 
-		tables, err := c.ListTables(1)
+		exists, err := tableExistsOnClient(c, table, 1)
 		if err != nil {
 			slog.Warn("table verification: ListTables failed on healthy agent",
 				"replica", replicaIdx, "attempt", attempt, "error", err)
-			if attempt < maxAttempts {
-				select {
-				case <-goCtx.Done():
-					return goCtx.Err()
-				case <-time.After(pollInterval):
-				}
-			}
-			continue
+		} else if exists {
+			slog.Debug("table verified on replica", "replica", replicaIdx, "table", table)
+			return nil
+		} else {
+			slog.Warn("table not found on replica after import",
+				"replica", replicaIdx, "table", table, "attempt", attempt)
 		}
-
-		for _, t := range tables {
-			if t.Name == table {
-				slog.Debug("table verified on replica", "replica", replicaIdx, "table", table)
-				return nil
-			}
-		}
-
-		slog.Warn("table not found on replica after import",
-			"replica", replicaIdx, "table", table, "attempt", attempt)
 
 		if attempt < maxAttempts {
 			select {
@@ -376,48 +343,27 @@ func executeWithRetries(ctx context.Context, operation string, fn func() error) 
 	return fmt.Errorf("%s failed after %d attempts: %w", operation, maxAttempts, lastErr)
 }
 
-// importWithIndexer builds index locally, uploads to S3 or shared volume, and imports on agents
-func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, tableConfig *client.TableConfigResponse, primary *client.AgentClient, cleanup func()) error {
-	// Validate indexer builder is configured
+// buildAndImportIndex builds an RT index from the given CSV onto the shared volume and imports it on agents
+func buildAndImportIndex(goCtx context.Context, ctx *Context, csvPath, targetTable string, tableConfig *client.TableConfigResponse, primary *client.AgentClient, cleanup func()) error {
 	if ctx.IndexerBuilder == nil {
 		return fmt.Errorf("indexer builder not configured (required for indexer method)")
 	}
-
-	// Determine storage mode: shared volume or S3
-	useSharedVolume := ctx.SharedVolumeMount != ""
-	if !useSharedVolume && ctx.S3Client == nil {
-		return fmt.Errorf("neither S3 client nor shared volume configured (one is required for indexer method)")
+	if ctx.SharedVolumeMount == "" {
+		return fmt.Errorf("shared volume mount not configured (required for indexer method)")
 	}
 
 	// Generate unique import ID for this operation
 	importID := uuid.New().String()
 
-	// Determine work directory and agent path based on storage mode
-	var workDir, agentIndexPath string
-	if useSharedVolume {
-		// Shared volume mode: build directly on shared volume
-		// Path structure: {SharedVolumeMount}/indexer-output/{dataset}/{importID}
-		workDir = filepath.Join(ctx.SharedVolumeMount, "indexer-output", ctx.Dataset, importID)
-		agentIndexPath = filepath.Join(workDir, "data", targetTable) // RT index is in data/{tableName}
-		slog.Info("using shared volume for indexer",
-			"workDir", workDir,
-			"agentPath", agentIndexPath)
-	} else {
-		// S3 mode: build locally, then upload
-		workDir = filepath.Join(ctx.IndexerWorkDir, importID)
-		defer func() {
-			if err := os.RemoveAll(workDir); err != nil {
-				slog.Warn("failed to cleanup work dir", "path", workDir, "error", err)
-			}
-		}()
-	}
-	s3Path := fmt.Sprintf("%s/%s/%s", ctx.S3IndexPrefix, ctx.Dataset, importID)
+	// Build directly to shared volume — same path is accessible on all agent pods
+	// Path structure: {SharedVolumeMount}/indexer-output/{dataset}/{importID}
+	workDir := filepath.Join(ctx.SharedVolumeMount, "indexer-output", ctx.Dataset, importID)
+	agentIndexPath := filepath.Join(workDir, "data", targetTable)
 
 	slog.Info("starting indexer import",
 		"table", targetTable,
 		"importID", importID,
-		"workDir", workDir,
-		"useSharedVolume", useSharedVolume)
+		"workDir", workDir)
 
 	// Use columns from schema registry (YAML config) — preserves user-declared order
 	var columns []indexer.Column
@@ -428,9 +374,8 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 		})
 	}
 
-	// Determine source path - CSV is always on S3 mount (read-only)
-	// The shared volume is only used for indexer output, not for source data
-	sourcePath := filepath.Join(ctx.S3Mount, ctx.CSVPath)
+	// Source CSV lives on the data mount (read-only); shared volume is for indexer output only
+	sourcePath := filepath.Join(ctx.S3Mount, csvPath)
 
 	// Set memory limit: table config > context > default
 	memLimit := tableConfig.MemLimit
@@ -463,40 +408,24 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 	}
 	slog.Info("index built", "rows", result.RowCount, "path", result.IndexPath)
 
-	// For S3 mode: upload to S3 and construct agent path
-	if !useSharedVolume {
-		if err := ctx.S3Client.UploadDirectory(goCtx, result.IndexPath, s3Path); err != nil {
-			cleanup()
-			return fmt.Errorf("S3 upload failed: %w", err)
-		}
-		slog.Info("index uploaded to S3", "path", s3Path)
-
-		// Agents have S3 mounted at ctx.S3Mount, so they access: {S3Mount}/{s3Path}
-		agentIndexPath = filepath.Join(ctx.S3Mount, s3Path)
-	}
-	// For shared volume mode: agentIndexPath is already set (same path as where we built)
-	// Add a delay to allow shared volume filesystem to sync across pods
-	if useSharedVolume {
-		syncDelay := 10 * time.Second
-		slog.Info("waiting for shared volume sync before agent import", "delay", syncDelay, "path", agentIndexPath)
-		select {
-		case <-goCtx.Done():
-			cleanup()
-			return goCtx.Err()
-		case <-time.After(syncDelay):
-		}
+	// Wait for the shared volume filesystem to sync the new index files across pods before importing
+	syncDelay := sharedVolumeSyncDelay()
+	slog.Info("waiting for shared volume sync before agent import", "delay", syncDelay, "path", agentIndexPath)
+	select {
+	case <-goCtx.Done():
+		cleanup()
+		return goCtx.Err()
+	case <-time.After(syncDelay):
 	}
 
-	// Build import config with prebuilt path
 	importConfig := client.ImportConfigFromEnv()
-	importConfig.Method = types.ImportMethodIndexer
 	importConfig.PrebuiltIndexPath = agentIndexPath
 
 	// For clustered tables: import on primary only (replicates automatically)
 	// For non-clustered: import on all replicas in parallel
 	if tableConfig.ClusterMain {
 		slog.Debug("importing prebuilt index (clustered)", "table", targetTable, "path", agentIndexPath)
-		if err := primary.Import(goCtx, targetTable, ctx.CSVPath, ctx.Cluster, 0, importConfig); err != nil {
+		if err := primary.RunImport(goCtx, targetTable, csvPath, ctx.Cluster, 0, importConfig); err != nil {
 			cleanup()
 			return fmt.Errorf("failed to import prebuilt index: %w", err)
 		}
@@ -515,7 +444,7 @@ func importWithIndexer(goCtx context.Context, ctx *Context, targetTable string, 
 			go func(replicaIdx int, replicaClient *client.AgentClient) {
 				defer wg.Done()
 				slog.Debug("importing prebuilt index on replica", "replica", replicaIdx, "table", targetTable)
-				if err := replicaClient.Import(importCtx, targetTable, ctx.CSVPath, "", 0, importConfig); err != nil {
+				if err := replicaClient.RunImport(importCtx, targetTable, csvPath, "", 0, importConfig); err != nil {
 					slog.Error("prebuilt index import failed on replica", "replica", replicaIdx, "error", err)
 					errCh <- fmt.Errorf("failed to import on replica %d: %w", replicaIdx, err)
 					cancelImports()

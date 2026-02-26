@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -20,24 +19,20 @@ import (
 )
 
 type Handler struct {
-	client        *manticore.Client
-	registry      *manticore.SchemaRegistry
-	clusterName   string
-	s3Mount       string
-	batchSize     int           // Batch size for csv-to-manticore imports
-	importWorkers int           // Default number of import worker goroutines
-	jobManager    *jobs.Manager // Job manager for async imports
+	client      *manticore.Client
+	registry    *manticore.SchemaRegistry
+	clusterName string
+	s3Mount     string
+	jobManager  *jobs.Manager // Job manager for async imports
 }
 
-func NewHandler(client *manticore.Client, registry *manticore.SchemaRegistry, clusterName, s3Mount string, batchSize, importWorkers int, jobManager *jobs.Manager) *Handler {
+func NewHandler(client *manticore.Client, registry *manticore.SchemaRegistry, clusterName, s3Mount string, jobManager *jobs.Manager) *Handler {
 	return &Handler{
-		client:        client,
-		registry:      registry,
-		clusterName:   clusterName,
-		s3Mount:       s3Mount,
-		batchSize:     batchSize,
-		importWorkers: importWorkers,
-		jobManager:    jobManager,
+		client:      client,
+		registry:    registry,
+		clusterName: clusterName,
+		s3Mount:     s3Mount,
+		jobManager:  jobManager,
 	}
 }
 
@@ -770,7 +765,6 @@ func (h *Handler) GetTableSchema(w http.ResponseWriter, r *http.Request) {
 // TableConfigResponse represents table behavior configuration
 type TableConfigResponse struct {
 	Table           string             `json:"table"`
-	ImportMethod    string             `json:"importMethod"`
 	ClusterMain     bool               `json:"clusterMain"`
 	HAStrategy      string             `json:"haStrategy"`
 	AgentRetryCount int                `json:"agentRetryCount"`
@@ -801,9 +795,8 @@ func (h *Handler) GetTableConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, TableConfigResponse{
-		Table:           tableName,
-		ImportMethod:    schema.ImportMethod,
-		ClusterMain:     schema.ClusterMain,
+		Table:       tableName,
+		ClusterMain: schema.ClusterMain,
 		HAStrategy:      schema.HAStrategy,
 		AgentRetryCount: schema.AgentRetryCount,
 		SegmentCount:    schema.SegmentCount,
@@ -827,10 +820,8 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For indexer method with prebuilt index, CSV path is not required on agent side
-	// (the CSV was already processed by the cron job)
-	if req.PrebuiltIndexPath == "" && req.CSVPath == "" {
-		errorResponse(w, http.StatusBadRequest, "csvPath is required (unless using prebuilt index)")
+	if req.PrebuiltIndexPath == "" {
+		errorResponse(w, http.StatusBadRequest, "prebuiltIndexPath is required")
 		return
 	}
 
@@ -842,160 +833,42 @@ func (h *Handler) StartImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build full path and validate CSV exists (skip for prebuilt index imports)
-	var csvFullPath string
-	if req.PrebuiltIndexPath != "" {
-		// Prebuilt index: validate the index path exists by checking for the .meta file
-		// Manticore indexes are stored as multiple files with a common prefix (e.g., table.meta, table.0.spa, etc.)
-		// The PrebuiltIndexPath is the prefix, not a file or directory itself
-		metaPath := req.PrebuiltIndexPath + ".meta"
-		if _, err := os.Stat(metaPath); err != nil {
-			if os.IsNotExist(err) {
-				errorResponse(w, http.StatusBadRequest, fmt.Sprintf("prebuilt index not found: %s (checked for %s)", req.PrebuiltIndexPath, metaPath))
-				return
-			}
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat prebuilt index: %v", err))
+	// Validate the prebuilt index exists by checking for the .meta file
+	metaPath := req.PrebuiltIndexPath + ".meta"
+	if _, err := os.Stat(metaPath); err != nil {
+		if os.IsNotExist(err) {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("prebuilt index not found: %s (checked for %s)", req.PrebuiltIndexPath, metaPath))
 			return
 		}
-		slog.Debug("using prebuilt index", "path", req.PrebuiltIndexPath, "metaFile", metaPath)
-	} else {
-		// Bulk import: validate CSV exists
-		csvFullPath = filepath.Join(h.s3Mount, req.CSVPath)
-		if _, err := os.Stat(csvFullPath); err != nil {
-			if os.IsNotExist(err) {
-				errorResponse(w, http.StatusBadRequest, fmt.Sprintf("CSV file not found: %s", csvFullPath))
-				return
-			}
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat CSV file: %v", err))
-			return
-		}
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat prebuilt index: %v", err))
+		return
 	}
 
-	// Determine worker count (API override > env default)
-	workers := h.importWorkers
-	if req.Workers > 0 {
-		workers = req.Workers
-	}
-
-	// Determine batch size (API override > env default)
-	batchSize := h.batchSize
-	if req.BatchSize > 0 {
-		batchSize = req.BatchSize
-	}
-
-	// Create job with new fields
-	job, err := h.jobManager.CreateJob(req.Table, req.CSVPath, req.Cluster, req.Method, req.MemLimit, req.PrebuiltIndexPath, workers, batchSize)
+	job, err := h.jobManager.CreateJob(req.Table, req.CSVPath, req.Cluster, req.MemLimit, req.PrebuiltIndexPath)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to create job: %v", err))
 		return
 	}
 
-	// Handle resume from checkpoint
-	if req.Resume {
-		existingJob := h.jobManager.FindJobByTableAndPath(req.Table, req.CSVPath)
-		if existingJob != nil && existingJob.LastLineNum > 0 {
-			job.LastLineNum = existingJob.LastLineNum
-			slog.Info("resuming import from checkpoint", "jobId", job.ID, "lastLineNum", job.LastLineNum, "oldJobId", existingJob.ID)
-		}
-	}
-
 	// Start async execution
-	go h.executeImportJob(job, csvFullPath, tableSchema)
+	go h.executeImportJob(job, tableSchema)
 
 	jsonResponse(w, http.StatusAccepted, types.StartImportResponse{JobID: job.ID})
 }
 
-// executeImportJob dispatches to the appropriate import method
-func (h *Handler) executeImportJob(job *types.ImportJob, csvFullPath string, tableSchema *manticore.Schema) {
-	// Create cancellable context
+// executeImportJob runs the import job asynchronously
+func (h *Handler) executeImportJob(job *types.ImportJob, tableSchema *manticore.Schema) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Register cancel function with job manager
 	h.jobManager.SetJobCancelFunc(job.ID, cancel)
 
-	// Update status to running
 	if err := h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusRunning, ""); err != nil {
 		slog.Error("failed to update job status", "jobId", job.ID, "error", err)
 		return
 	}
 
-	// Dispatch based on import method
-	if job.Method == types.ImportMethodIndexer {
-		h.executeIndexerImport(ctx, job, csvFullPath, tableSchema)
-		return
-	}
-
-	// Default: bulk API import
-	h.executeBulkImport(ctx, job, csvFullPath, tableSchema)
-}
-
-// executeBulkImport runs the import using a worker pool and HTTP bulk API
-func (h *Handler) executeBulkImport(ctx context.Context, job *types.ImportJob, csvFullPath string, tableSchema *manticore.Schema) {
-	slog.Info("starting bulk import job", "jobId", job.ID, "table", job.Table, "csv", csvFullPath,
-		"cluster", job.Cluster, "workers", job.Workers, "batchSize", job.BatchSize, "resumeFrom", job.LastLineNum)
-
-	// Check if CSV has a header row
-	hasHeader, err := manticore.CSVHasHeader(csvFullPath)
-	if err != nil {
-		h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusFailed,
-			fmt.Sprintf("failed to check CSV header: %v", err))
-		return
-	}
-
-	// Create worker pool with checkpoint callback for persistence
-	pool := NewImportWorkerPool(ctx, ImportOptions{
-		Table:        job.Table,
-		Cluster:      job.Cluster,
-		Columns:      convertColumns(tableSchema.Columns),
-		BatchSize:    job.BatchSize,
-		WorkerCount:  job.Workers,
-		MySQLHost:    h.client.Host(),
-		HTTPPort:     h.client.HTTPPort(),
-		ErrorLogPath: h.jobManager.ErrorLogPath(job.ID),
-		SkipHeader:   hasHeader,
-		OnCheckpoint: func(processed, failed, lastLine int64) {
-			job.ProcessedLines = processed
-			job.FailedLines = failed
-			job.LastLineNum = lastLine
-			if err := h.jobManager.UpdateJob(job); err != nil {
-				slog.Warn("failed to persist checkpoint", "jobId", job.ID, "error", err)
-			} else {
-				slog.Debug("checkpoint persisted", "jobId", job.ID, "lastLineNum", lastLine)
-			}
-		},
-	})
-
-	// Run import
-	runErr := pool.Run(csvFullPath, job.LastLineNum)
-
-	// Get final progress
-	processed, failed, lastLine := pool.Progress()
-
-	// Update job with final stats
-	job.ProcessedLines = processed
-	job.FailedLines = failed
-	job.LastLineNum = lastLine
-	h.jobManager.UpdateJob(job)
-
-	// Check if cancelled
-	if runErr == context.Canceled {
-		h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusCancelled, "")
-		slog.Info("bulk import job was cancelled", "jobId", job.ID, "lastLineNum", lastLine)
-		return
-	}
-
-	// Check for errors
-	if runErr != nil {
-		h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusFailed,
-			fmt.Sprintf("import failed: %v (see %s.error.log)", runErr, job.ID))
-		return
-	}
-
-	// Success
-	h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusCompleted, "")
-	slog.Info("bulk import job completed successfully", "jobId", job.ID,
-		"processedLines", processed, "failedLines", failed)
+	h.executeIndexerImport(ctx, job, "", tableSchema)
 }
 
 // GetImportStatus returns the status of an import job

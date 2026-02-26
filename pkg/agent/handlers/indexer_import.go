@@ -65,10 +65,6 @@ func (h *Handler) executeIndexerImport(ctx context.Context, job *types.ImportJob
 		return
 	}
 
-	// Update final stats and mark completed
-	h.jobManager.UpdateJob(job)
 	h.jobManager.UpdateJobStatus(job.ID, types.ImportJobStatusCompleted, "")
-	slog.Info("indexer import job completed successfully",
-		"jobId", job.ID,
-		"processedLines", job.ProcessedLines)
+	slog.Info("indexer import job completed successfully", "jobId", job.ID)
 }
