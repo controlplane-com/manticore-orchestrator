@@ -3237,6 +3237,15 @@ func (s *Server) handleBroadcastQuery(w http.ResponseWriter, query string, repli
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					results[idx] = ReplicaQueryResult{
+						ReplicaIndex: idx,
+						Status:       "error",
+						Error:        fmt.Sprintf("query panicked: %v", r),
+					}
+				}
+			}()
 			result := s.executeQueryOnReplica(query, idx)
 			results[idx] = *result
 		}(i)

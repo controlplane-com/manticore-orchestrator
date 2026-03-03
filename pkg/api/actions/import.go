@@ -486,6 +486,10 @@ func buildIndex(goCtx context.Context, ctx *Context, csvPath, targetTable string
 // importOnReplica invokes the agent's Import method on a single replica and verifies the table
 // exists afterwards. The importConfig must have PrebuiltIndexPath set to the shared-volume path
 // returned by buildIndex.
+//
+// If the import job reports success but the table is not visible, the import is retried once.
+// This handles the case where a pod restarts a second time between job completion and the first
+// ListTables poll, wiping the table from searchd before verification can see it.
 func importOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx int,
 	table, csvPath, cluster string, importConfig client.ImportConfig) error {
 
@@ -493,9 +497,21 @@ func importOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx in
 	if err := c.RunImport(goCtx, table, csvPath, cluster, 0, importConfig); err != nil {
 		return fmt.Errorf("import failed on replica %d: %w", replicaIdx, err)
 	}
+
 	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
-		return fmt.Errorf("table verification failed after import on replica %d: %w", replicaIdx, err)
+		slog.Warn("table not found after import, retrying once",
+			"replica", replicaIdx, "table", table, "verifyErr", err)
+		if createErr := c.CreateTable(table, 0); createErr != nil {
+			slog.Debug("CreateTable on retry (may already exist)", "error", createErr)
+		}
+		if retryErr := c.RunImport(goCtx, table, csvPath, cluster, 0, importConfig); retryErr != nil {
+			return fmt.Errorf("import retry failed on replica %d: %w", replicaIdx, retryErr)
+		}
+		if verifyErr := verifyTableExists(goCtx, c, table, replicaIdx); verifyErr != nil {
+			return fmt.Errorf("table verification failed after import retry on replica %d: %w", replicaIdx, verifyErr)
+		}
 	}
+
 	slog.Info("import verified on replica", "replica", replicaIdx, "table", table)
 	return nil
 }
