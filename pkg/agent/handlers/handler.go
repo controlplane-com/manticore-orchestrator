@@ -178,14 +178,20 @@ func (h *Handler) Grastate(w http.ResponseWriter, r *http.Request) {
 //   - MySQL port is responding
 //   - Either no cluster configured (fresh start, waiting for init) OR cluster status is "primary"
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
-	// Check if MySQL/searchd is responding
+	// Check if MySQL/searchd is responding. Retry once — the connection pool may have
+	// returned a stale connection that Manticore already closed on its side (broken pipe /
+	// EOF). A single retry forces the pool to open a fresh connection.
 	_, err := h.client.GetStatus()
 	if err != nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{
-			"ready":  false,
-			"reason": fmt.Sprintf("searchd not ready: %v", err),
-		})
-		return
+		slog.Debug("ready check: searchd query failed, retrying once", "error", err)
+		_, err = h.client.GetStatus()
+		if err != nil {
+			jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{
+				"ready":  false,
+				"reason": fmt.Sprintf("searchd not ready: %v", err),
+			})
+			return
+		}
 	}
 
 	if !Initialized() {
@@ -196,10 +202,14 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check cluster status
+	// Check cluster status. Retry once on connection error (not on unknown status —
+	// unknown status is a legitimate Galera state that the failure threshold handles).
 	clusterStatus, err := h.client.GetClusterStatus(h.clusterName)
+	if err != nil {
+		slog.Debug("ready check: cluster status query failed, retrying once", "error", err)
+		clusterStatus, err = h.client.GetClusterStatus(h.clusterName)
+	}
 	if err != nil || clusterStatus == "" || clusterStatus == "unknown" {
-		//No cluster at all.
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{
 			"ready":         false,
 			"reason":        "cluster not synced",
