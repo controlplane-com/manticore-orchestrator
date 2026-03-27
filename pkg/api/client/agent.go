@@ -26,16 +26,21 @@ const (
 
 // AgentClient is an HTTP client for the Manticore agent
 type AgentClient struct {
-	baseURL    string
-	authToken  string
-	httpClient *http.Client
+	baseURL           string
+	authToken         string
+	previousAuthToken string // non-empty only during token rotation
+	httpClient        *http.Client
 }
 
-// NewAgentClient creates a new agent client with authentication
-func NewAgentClient(baseURL, authToken string) *AgentClient {
+// NewAgentClient creates a new agent client with authentication.
+// previousAuthToken may be empty; when set it is used as a fallback if the
+// primary token is rejected with 401, covering rolling deployments where some
+// agents are still on the old token.
+func NewAgentClient(baseURL, authToken, previousAuthToken string) *AgentClient {
 	return &AgentClient{
-		baseURL:   baseURL,
-		authToken: authToken,
+		baseURL:           baseURL,
+		authToken:         authToken,
+		previousAuthToken: previousAuthToken,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Minute, // Long timeout for imports
 		},
@@ -111,6 +116,34 @@ func (c *AgentClient) doRequest(method, path string, body interface{}, maxRetrie
 			continue
 		}
 
+		// On 401, retry once with the previous token if available (token rotation support)
+		if resp.StatusCode == http.StatusUnauthorized && c.previousAuthToken != "" {
+			var bodyReader2 io.Reader
+			if jsonBody != nil {
+				bodyReader2 = bytes.NewReader(jsonBody)
+			}
+			req2, err2 := http.NewRequest(method, c.baseURL+path, bodyReader2)
+			if err2 != nil {
+				return nil, fmt.Errorf("API error (401): invalid token")
+			}
+			req2.Header.Set("Authorization", "Bearer "+c.previousAuthToken)
+			if body != nil {
+				req2.Header.Set("Content-Type", "application/json")
+			}
+			resp2, err2 := c.httpClient.Do(req2)
+			if err2 != nil {
+				return nil, fmt.Errorf("API error (401): invalid token")
+			}
+			respBody2, _ := io.ReadAll(resp2.Body)
+			resp2.Body.Close()
+			if resp2.StatusCode >= 400 {
+				var errResp types.Response
+				json.Unmarshal(respBody2, &errResp)
+				return nil, fmt.Errorf("API error (%d): %s", resp2.StatusCode, errResp.Error)
+			}
+			return respBody2, nil
+		}
+
 		// Non-retryable client errors (4xx)
 		if resp.StatusCode >= 400 {
 			var errResp types.Response
@@ -180,6 +213,32 @@ func (c *AgentClient) HealthProbe() (*types.HealthResponse, error) {
 	// 503 means the pod doesn't exist (CPLN infra response)
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		return nil, fmt.Errorf("replica unavailable (503)")
+	}
+
+	// On 401, retry once with the previous token if available (token rotation support)
+	if resp.StatusCode == http.StatusUnauthorized && c.previousAuthToken != "" {
+		req2, err2 := http.NewRequest("GET", c.baseURL+"/api/health", nil)
+		if err2 != nil {
+			return nil, fmt.Errorf("probe returned status 401")
+		}
+		req2.Header.Set("Authorization", "Bearer "+c.previousAuthToken)
+		resp2, err2 := probeClient.Do(req2)
+		if err2 != nil {
+			return nil, fmt.Errorf("probe failed: %w", err2)
+		}
+		defer resp2.Body.Close()
+		body, err = io.ReadAll(resp2.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		if resp2.StatusCode >= 400 {
+			return nil, fmt.Errorf("probe returned status %d", resp2.StatusCode)
+		}
+		var healthResp2 types.HealthResponse
+		if err := json.Unmarshal(body, &healthResp2); err != nil {
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+		return &healthResp2, nil
 	}
 
 	// Any other error status

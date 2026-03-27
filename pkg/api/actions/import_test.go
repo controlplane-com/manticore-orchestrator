@@ -142,7 +142,7 @@ func TestImport_SlotSwapFromAToB(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "products",
 		CSVPath:           "/data/products.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -190,7 +190,7 @@ func TestImport_SlotSwapFromBToA(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "products",
 		CSVPath:           "/data/products.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -238,7 +238,7 @@ func TestImport_DefaultsToSlotAWhenNoMainTableExists(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "products",
 		CSVPath:           "/data/products.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -381,7 +381,7 @@ func TestImport_MultipleReplicas(t *testing.T) {
 
 	clients := make([]*client.AgentClient, 3)
 	for i := 0; i < 3; i++ {
-		clients[i] = client.NewAgentClient(servers[i].URL, "token")
+		clients[i] = client.NewAgentClient(servers[i].URL, "token", "")
 	}
 
 	ctx := &Context{
@@ -485,7 +485,7 @@ func TestImport_MainTableNames(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "mydata",
 		CSVPath:           "/data/mydata.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -526,7 +526,7 @@ func TestWaitForReplication_AllReplicasReady(t *testing.T) {
 
 	clients := make([]*client.AgentClient, 2)
 	for i := 0; i < 2; i++ {
-		clients[i] = client.NewAgentClient(servers[i].URL, "token")
+		clients[i] = client.NewAgentClient(servers[i].URL, "token", "")
 	}
 
 	ctx := &Context{Clients: clients}
@@ -547,7 +547,7 @@ func TestWaitForReplication_ContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	clients := []*client.AgentClient{client.NewAgentClient(server.URL, "token")}
+	clients := []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")}
 	ctx := &Context{Clients: clients}
 
 	// Create a context that we'll cancel immediately
@@ -657,7 +657,7 @@ func TestImport_CleanupOnImportFailure(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "products",
 		CSVPath:           "/data/products.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -794,7 +794,7 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "products",
 		CSVPath:           "/data/products.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -906,7 +906,7 @@ func TestImport_NoClusterDropOnFailure(t *testing.T) {
 	defer server.Close()
 
 	ctx := &Context{
-		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token")},
+		Clients:           []*client.AgentClient{client.NewAgentClient(server.URL, "token", "")},
 		Dataset:           "products",
 		CSVPath:           "/data/products.csv",
 		IndexerBuilder:    &mockIndexBuilder{},
@@ -1035,7 +1035,7 @@ func TestImport_CleanupOnMultipleReplicas(t *testing.T) {
 
 	clients := make([]*client.AgentClient, 3)
 	for i := 0; i < 3; i++ {
-		clients[i] = client.NewAgentClient(servers[i].URL, "token")
+		clients[i] = client.NewAgentClient(servers[i].URL, "token", "")
 	}
 
 	ctx := &Context{

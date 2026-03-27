@@ -179,7 +179,7 @@ func TestGetReplicaInfo_HealthCheckFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.NewAgentClient(server.URL, "test-token")
+	c := client.NewAgentClient(server.URL, "test-token", "")
 	info := getReplicaInfo(0, c)
 
 	if info.Index != 0 {
@@ -215,7 +215,7 @@ func TestGetReplicaInfo_HealthyNoGrastate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.NewAgentClient(server.URL, "test-token")
+	c := client.NewAgentClient(server.URL, "test-token", "")
 	info := getReplicaInfo(1, c)
 
 	if info.Index != 1 {
@@ -261,7 +261,7 @@ func TestGetReplicaInfo_FullSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.NewAgentClient(server.URL, "test-token")
+	c := client.NewAgentClient(server.URL, "test-token", "")
 	info := getReplicaInfo(2, c)
 
 	if info.Index != 2 {
@@ -302,7 +302,7 @@ func TestGetReplicaInfo_NullUUID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.NewAgentClient(server.URL, "test-token")
+	c := client.NewAgentClient(server.URL, "test-token", "")
 	info := getReplicaInfo(0, c)
 
 	if info.HasValidUUID {
@@ -327,7 +327,7 @@ func TestGetReplicaInfo_EmptyUUID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.NewAgentClient(server.URL, "test-token")
+	c := client.NewAgentClient(server.URL, "test-token", "")
 	info := getReplicaInfo(0, c)
 
 	if info.HasValidUUID {
@@ -352,7 +352,7 @@ func TestGetReplicaInfo_GrastateNotExists(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.NewAgentClient(server.URL, "test-token")
+	c := client.NewAgentClient(server.URL, "test-token", "")
 	info := getReplicaInfo(0, c)
 
 	if info.HasValidUUID {
@@ -363,8 +363,8 @@ func TestGetReplicaInfo_GrastateNotExists(t *testing.T) {
 func TestRepairWithSource_InvalidSourceReplica(t *testing.T) {
 	ctx := &Context{
 		Clients: []*client.AgentClient{
-			client.NewAgentClient("http://replica-0:8080", "token"),
-			client.NewAgentClient("http://replica-1:8080", "token"),
+			client.NewAgentClient("http://replica-0:8080", "token", ""),
+			client.NewAgentClient("http://replica-1:8080", "token", ""),
 		},
 	}
 
@@ -396,7 +396,7 @@ func TestRepairWithSource_SourceNotReachable(t *testing.T) {
 
 	ctx := &Context{
 		Clients: []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		},
 	}
 
@@ -428,7 +428,7 @@ func TestRepairWithSource_SourceAlreadyPrimary(t *testing.T) {
 
 	ctx := &Context{
 		Clients: []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		},
 	}
 
@@ -469,7 +469,7 @@ func TestRepairWithSource_BootstrapNeeded(t *testing.T) {
 
 	ctx := &Context{
 		Clients: []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		},
 	}
 

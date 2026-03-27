@@ -26,8 +26,11 @@ import (
 // startTime tracks when the agent started, used for bootstrap timeout decisions
 var startTime = time.Now()
 
-// authMiddleware validates the bearer token for protected endpoints
-func authMiddleware(token string) mux.MiddlewareFunc {
+// authMiddleware validates the bearer token for protected endpoints.
+// previousToken may be non-empty during a rolling token rotation — if set,
+// both the current and previous token are accepted so that callers on either
+// side of the rollout can still authenticate.
+func authMiddleware(token, previousToken string) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip auth for health and ready endpoints (used by readiness probes)
@@ -49,7 +52,8 @@ func authMiddleware(token string) mux.MiddlewareFunc {
 				return
 			}
 
-			if parts[1] != token {
+			presented := parts[1]
+			if presented != token && (previousToken == "" || presented != previousToken) {
 				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
 				return
 			}
@@ -78,6 +82,7 @@ func main() {
 	s3Mount := getEnv("S3_MOUNT", "/mnt/s3")
 	listenAddr := getEnv("LISTEN_ADDR", ":8080")
 	authToken := getEnv("AUTH_TOKEN", "")
+	previousAuthToken := getEnv("PREVIOUS_AUTH_TOKEN", "")
 	orchestratorURL := getEnv("ORCHESTRATOR_API_URL", "") // e.g., "http://orchestrator:8080"
 	initDelaySeconds := getEnvInt("INIT_DELAY_SECONDS", 30)
 
@@ -146,7 +151,7 @@ func main() {
 	api := r.PathPrefix("/api").Subrouter()
 
 	// Apply auth middleware to all API routes
-	api.Use(authMiddleware(authToken))
+	api.Use(authMiddleware(authToken, previousAuthToken))
 
 	// Health and readiness (exempt from auth in middleware)
 	api.HandleFunc("/health", h.Health).Methods("GET")

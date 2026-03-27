@@ -22,6 +22,7 @@ import (
 type Config struct {
 	Action            string
 	AuthToken         string
+	PreviousAuthToken string
 	Type              string // "delta" or "main"
 	Dataset           string
 	Slot              string // "a" or "b" when Type=main
@@ -64,6 +65,7 @@ func loadConfig() Config {
 	cfg := Config{
 		Action:            requireEnv("ACTION"),
 		AuthToken:         requireEnv("AUTH_TOKEN"),
+		PreviousAuthToken: getEnv("PREVIOUS_AUTH_TOKEN", ""),
 		Type:              getEnv("TYPE", "delta"),
 		Dataset:           requireEnv("DATASET"),
 		AgentPort:         getEnv("AGENT_PORT", "8080"),
@@ -143,7 +145,7 @@ func runBackup(cfg Config) error {
 
 	// Step 1: Call agent to run manticore-backup
 	agentURL := fmt.Sprintf("http://%s:%s", cfg.ManticoreHost, cfg.AgentPort)
-	agentClient := client.NewAgentClient(agentURL, cfg.AuthToken)
+	agentClient := client.NewAgentClient(agentURL, cfg.AuthToken, cfg.PreviousAuthToken)
 
 	// Resolve segment-aware table names for multi-segment configurations
 	backupTable := cfg.TableName
@@ -256,7 +258,7 @@ func runRestore(cfg Config) error {
 
 	// Step 2: Call agent to restore (handles cluster ops + IMPORT TABLE)
 	agentURL := fmt.Sprintf("http://%s:%s", cfg.ManticoreHost, cfg.AgentPort)
-	agentClient := client.NewAgentClient(agentURL, cfg.AuthToken)
+	agentClient := client.NewAgentClient(agentURL, cfg.AuthToken, cfg.PreviousAuthToken)
 
 	// Resolve segment count — multi-segment tables need one restore per segment
 	segmentCount := 1
