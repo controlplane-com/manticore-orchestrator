@@ -292,6 +292,38 @@ func initInternal(ctx *initContext) (*InitResult, error) {
 	clusterDesc := cluster.FindWinningClusterWithPreference(sharedReplicas, "", "", preferredUUID)
 
 	if clusterDesc == nil {
+		// Check if the caller is already healthy in a cluster. This handles the case where
+		// grastate calls to peers fail (e.g. auth token mismatch during a rolling deploy)
+		// but the cluster is actually running fine. If the caller itself reports primary+synced,
+		// trust its own state and return continue rather than looping forever on wait.
+		if ctx.callerInfo != nil && ctx.callerInfo.ClusterStatus == "primary" && ctx.callerInfo.NodeState == "synced" {
+			slog.Info("no cluster detected from peers but caller is already synced and primary — returning continue",
+				"callingReplica", ctx.originalCallingReplica)
+			tableSlots := DiscoverTableSlots(ctx.clients, tableNames)
+			return &InitResult{Action: "continue", TableSlots: tableSlots}, nil
+		}
+
+		// Fallback: grastate may be unavailable (e.g. auth token mismatch) but health checks
+		// can still show which peers are in a primary cluster. If we can see a live primary
+		// peer via health, use it as source rather than blocking on wait or triggering a
+		// spurious bootstrap. Slot discovery is skipped in this path — the same auth issue
+		// that breaks grastate also breaks ListTables, and the joining agent will replicate
+		// table state from the cluster directly.
+		for i, r := range ctx.replicas {
+			if r.Health != nil && r.Health.ClusterStatus == "primary" {
+				sourceAddr := deriveReplicationAddr(ctx.clients[i].BaseURL())
+				slog.Info("cluster detected from health check (grastate unavailable) — directing caller to join",
+					"callingReplica", ctx.originalCallingReplica, "sourceReplica", ctx.availableReplicaIndices[i], "sourceAddr", sourceAddr)
+
+				action := "join"
+				if ctx.callerInfo != nil && ctx.callerInfo.Exists && ctx.callerInfo.UUID != "" {
+					action = "rejoin"
+				}
+				tableSlots := DiscoverTableSlots(ctx.clients, tableNames)
+				return &InitResult{Action: action, SourceAddr: sourceAddr, TableSlots: tableSlots}, nil
+			}
+		}
+
 		// No cluster exists among available replicas - elect lowest-indexed replica as bootstrap leader
 		// Available replicas = caller + other available replicas
 		lowestAvailable := ctx.originalCallingReplica

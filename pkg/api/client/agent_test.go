@@ -13,7 +13,7 @@ import (
 )
 
 func TestNewAgentClient(t *testing.T) {
-	client := NewAgentClient("http://localhost:8080", "test-token")
+	client := NewAgentClient("http://localhost:8080", "test-token", "")
 
 	if client == nil {
 		t.Fatal("NewAgentClient() returned nil")
@@ -27,7 +27,7 @@ func TestNewAgentClient(t *testing.T) {
 }
 
 func TestAgentClient_BaseURL(t *testing.T) {
-	client := NewAgentClient("http://example.com:8080", "token")
+	client := NewAgentClient("http://example.com:8080", "token", "")
 	if client.BaseURL() != "http://example.com:8080" {
 		t.Errorf("BaseURL() = %q, want %q", client.BaseURL(), "http://example.com:8080")
 	}
@@ -55,7 +55,7 @@ func TestAgentClient_Health(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "test-token")
+	client := NewAgentClient(server.URL, "test-token", "")
 	resp, err := client.Health(0)
 
 	if err != nil {
@@ -80,7 +80,7 @@ func TestAgentClient_HealthProbe_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	resp, err := client.HealthProbe()
 
 	if err != nil {
@@ -98,7 +98,7 @@ func TestAgentClient_HealthProbe_503Detection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	_, err := client.HealthProbe()
 
 	if err == nil {
@@ -116,7 +116,7 @@ func TestAgentClient_HealthProbe_4xxError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	_, err := client.HealthProbe()
 
 	if err == nil {
@@ -139,7 +139,7 @@ func TestAgentClient_Grastate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	resp, err := client.Grastate(0)
 
 	if err != nil {
@@ -172,7 +172,7 @@ func TestAgentClient_ListTables(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	tables, err := client.ListTables(0)
 
 	if err != nil {
@@ -205,7 +205,7 @@ func TestAgentClient_CreateTable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.CreateTable("test_table", 0)
 
 	if err != nil {
@@ -231,7 +231,7 @@ func TestAgentClient_DropTable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.DropTable("old_table", 0)
 
 	if err != nil {
@@ -253,7 +253,7 @@ func TestAgentClient_ClusterBootstrap(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.ClusterBootstrap(0)
 
 	if err != nil {
@@ -279,7 +279,7 @@ func TestAgentClient_ClusterJoin(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.ClusterJoin("replica-0:9312", 0)
 
 	if err != nil {
@@ -305,7 +305,7 @@ func TestAgentClient_ClusterRejoin(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.ClusterRejoin("replica-1:9312", 0)
 
 	if err != nil {
@@ -331,7 +331,7 @@ func TestAgentClient_ClusterAdd(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.ClusterAdd("products_delta", 0)
 
 	if err != nil {
@@ -362,7 +362,7 @@ func TestAgentClient_CreateDistributed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	err := client.CreateDistributed("products", []string{"products_main_a", "products_delta"}, nil, "", 0, 0)
 
 	if err != nil {
@@ -396,7 +396,7 @@ func TestAgentClient_StartImport(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	jobID, err := client.StartImport(types.ImportRequest{
 		Table:             "products",
 		CSVPath:           "/data/products.csv",
@@ -431,7 +431,7 @@ func TestAgentClient_GetImportStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	job, err := client.GetImportStatus("test-job-123", 0)
 
 	if err != nil {
@@ -469,7 +469,7 @@ func TestAgentClient_Import(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	// Use a short poll interval for testing
 	config := ImportConfig{
 		PollInterval: 10 * time.Millisecond,
@@ -497,7 +497,7 @@ func TestAgentClient_Import_Failure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	config := ImportConfig{
 		PollInterval: 10 * time.Millisecond,
 		PollTimeout:  5 * time.Second,
@@ -521,7 +521,7 @@ func TestAgentClient_4xxErrorNoRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	_, err := client.Health(0)
 
 	if err == nil {
@@ -547,7 +547,7 @@ func TestAgentClient_5xxErrorRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAgentClient(server.URL, "token")
+	client := NewAgentClient(server.URL, "token", "")
 	resp, err := client.Health(0)
 
 	if err != nil {

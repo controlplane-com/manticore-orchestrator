@@ -173,7 +173,7 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer server.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products"})
@@ -192,7 +192,7 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer server.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products"})
@@ -206,7 +206,7 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer server.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products"})
@@ -225,7 +225,7 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer server.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products", "addresses"})
@@ -245,7 +245,7 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer server.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(server.URL, "token"),
+			client.NewAgentClient(server.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products", "newTable"})
@@ -271,8 +271,8 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer inCluster.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(notInCluster.URL, "token"),
-			client.NewAgentClient(inCluster.URL, "token"),
+			client.NewAgentClient(notInCluster.URL, "token", ""),
+			client.NewAgentClient(inCluster.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products"})
@@ -289,7 +289,7 @@ func TestDiscoverTableSlots(t *testing.T) {
 		defer notInCluster.Close()
 
 		clients := []*client.AgentClient{
-			client.NewAgentClient(notInCluster.URL, "token"),
+			client.NewAgentClient(notInCluster.URL, "token", ""),
 		}
 
 		result := DiscoverTableSlots(clients, []string{"products"})
@@ -309,7 +309,7 @@ func TestInit_BootstrapWhenSafeToBootstrap(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(unavailableServer.URL, "token")
+			clients[i] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -357,7 +357,7 @@ func TestInit_BootstrapAfterTimeout(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(unavailableServer.URL, "token")
+			clients[i] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -395,7 +395,7 @@ func TestInit_WaitBeforeTimeout(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(unavailableServer.URL, "token")
+			clients[i] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -467,14 +467,14 @@ func TestInit_JoinExistingCluster(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		// Replica 0 (calling) uses unavailable server
-		clients[0] = client.NewAgentClient(unavailableServer.URL, "token")
+		clients[0] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		// Replica 1 uses healthy server
 		if replicaCount > 1 {
-			clients[1] = client.NewAgentClient(healthyServer.URL, "token")
+			clients[1] = client.NewAgentClient(healthyServer.URL, "token", "")
 		}
 		// Any other replicas use unavailable
 		for i := 2; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(unavailableServer.URL, "token")
+			clients[i] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -519,7 +519,7 @@ func TestInit_ContextCancellation(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(slowServer.URL, "token")
+			clients[i] = client.NewAgentClient(slowServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -556,7 +556,7 @@ func TestInit_InvalidCallingReplica(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(server.URL, "token")
+			clients[i] = client.NewAgentClient(server.URL, "token", "")
 		}
 		return clients
 	}
@@ -661,7 +661,7 @@ func TestInit_BootstrapLeaderElection_CallerIsLowest(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(server.URL, "token")
+			clients[i] = client.NewAgentClient(server.URL, "token", "")
 		}
 		return clients
 	}
@@ -702,7 +702,7 @@ func TestInit_BootstrapLeaderElection_CallerNotLowest(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		for i := 0; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(server.URL, "token")
+			clients[i] = client.NewAgentClient(server.URL, "token", "")
 		}
 		return clients
 	}
@@ -747,10 +747,10 @@ func TestInit_BootstrapLeaderElection_LowestUnavailable(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		// Replica 0: unavailable
-		clients[0] = client.NewAgentClient(unavailableServer.URL, "token")
+		clients[0] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		// Replicas 1+: available but no cluster
 		for i := 1; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(noClusterServer.URL, "token")
+			clients[i] = client.NewAgentClient(noClusterServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -792,10 +792,10 @@ func TestInit_BootstrapLeaderElection_MiddleReplica(t *testing.T) {
 	clientBuilder := func(replicaCount int) []*client.AgentClient {
 		clients := make([]*client.AgentClient, replicaCount)
 		// Replica 0: unavailable
-		clients[0] = client.NewAgentClient(unavailableServer.URL, "token")
+		clients[0] = client.NewAgentClient(unavailableServer.URL, "token", "")
 		// Replicas 1+: available but no cluster
 		for i := 1; i < replicaCount; i++ {
-			clients[i] = client.NewAgentClient(noClusterServer.URL, "token")
+			clients[i] = client.NewAgentClient(noClusterServer.URL, "token", "")
 		}
 		return clients
 	}
@@ -837,10 +837,10 @@ func TestFilterAvailableClients_ReturnsIndices(t *testing.T) {
 	defer unavailableServer.Close()
 
 	clients := []*client.AgentClient{
-		client.NewAgentClient(availableServer.URL, "token"),   // 0: available
-		client.NewAgentClient(unavailableServer.URL, "token"), // 1: unavailable
-		client.NewAgentClient(availableServer.URL, "token"),   // 2: available (caller)
-		client.NewAgentClient(availableServer.URL, "token"),   // 3: available
+		client.NewAgentClient(availableServer.URL, "token", ""),   // 0: available
+		client.NewAgentClient(unavailableServer.URL, "token", ""), // 1: unavailable
+		client.NewAgentClient(availableServer.URL, "token", ""),   // 2: available (caller)
+		client.NewAgentClient(availableServer.URL, "token", ""),   // 3: available
 	}
 
 	// Filter with replica 2 as caller (excluded)

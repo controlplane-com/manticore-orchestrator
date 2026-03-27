@@ -44,6 +44,7 @@ type Config struct {
 	Org                  string
 	TablesConfig         string
 	AuthToken            string
+	PreviousAuthToken    string
 	CplnToken            string
 	ListenAddr           string
 	BootstrapTimeout     int    // Seconds to wait before bootstrapping a lone replica
@@ -163,6 +164,7 @@ func main() {
 		Org:                  extractName(getEnv("CPLN_ORG", "")),
 		TablesConfig:         getEnv("TABLES_CONFIG", "{}"),
 		AuthToken:            getEnv("AUTH_TOKEN", ""),
+		PreviousAuthToken:    getEnv("PREVIOUS_AUTH_TOKEN", ""),
 		CplnToken:            getEnv("CPLN_TOKEN", ""),
 		ListenAddr:           getEnv("LISTEN_ADDR", ":8080"),
 		BootstrapTimeout:     getEnvInt("BOOTSTRAP_TIMEOUT", 60),
@@ -393,7 +395,7 @@ func (s *Server) buildClients(replicaCount int) []*client.AgentClient {
 	for i := 0; i < replicaCount; i++ {
 		endpoint := fmt.Sprintf("http://%s-%d.%s:%s",
 			s.config.WorkloadName, i, s.config.WorkloadName, s.config.AgentPort)
-		clients = append(clients, client.NewAgentClient(endpoint, s.config.AuthToken))
+		clients = append(clients, client.NewAgentClient(endpoint, s.config.AuthToken, s.config.PreviousAuthToken))
 	}
 	return clients
 }
@@ -2967,7 +2969,7 @@ func buildClientsStatic(config Config, replicaCount int) []*client.AgentClient {
 	for i := 0; i < replicaCount; i++ {
 		endpoint := fmt.Sprintf("http://%s-%d.%s:%s",
 			config.WorkloadName, i, config.WorkloadName, config.AgentPort)
-		clients = append(clients, client.NewAgentClient(endpoint, config.AuthToken))
+		clients = append(clients, client.NewAgentClient(endpoint, config.AuthToken, config.PreviousAuthToken))
 	}
 	slog.Debug("agent endpoints", "count", len(clients))
 	return clients
