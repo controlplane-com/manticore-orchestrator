@@ -303,6 +303,27 @@ func initInternal(ctx *initContext) (*InitResult, error) {
 			return &InitResult{Action: "continue", TableSlots: tableSlots}, nil
 		}
 
+		// Fallback: grastate may be unavailable (e.g. auth token mismatch) but health checks
+		// can still show which peers are in a primary cluster. If we can see a live primary
+		// peer via health, use it as source rather than blocking on wait or triggering a
+		// spurious bootstrap. Slot discovery is skipped in this path — the same auth issue
+		// that breaks grastate also breaks ListTables, and the joining agent will replicate
+		// table state from the cluster directly.
+		for i, r := range ctx.replicas {
+			if r.Health != nil && r.Health.ClusterStatus == "primary" {
+				sourceAddr := deriveReplicationAddr(ctx.clients[i].BaseURL())
+				slog.Info("cluster detected from health check (grastate unavailable) — directing caller to join",
+					"callingReplica", ctx.originalCallingReplica, "sourceReplica", ctx.availableReplicaIndices[i], "sourceAddr", sourceAddr)
+
+				action := "join"
+				if ctx.callerInfo != nil && ctx.callerInfo.Exists && ctx.callerInfo.UUID != "" {
+					action = "rejoin"
+				}
+				tableSlots := DiscoverTableSlots(ctx.clients, tableNames)
+				return &InitResult{Action: action, SourceAddr: sourceAddr, TableSlots: tableSlots}, nil
+			}
+		}
+
 		// No cluster exists among available replicas - elect lowest-indexed replica as bootstrap leader
 		// Available replicas = caller + other available replicas
 		lowestAvailable := ctx.originalCallingReplica
