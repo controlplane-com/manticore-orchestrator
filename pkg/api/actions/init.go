@@ -292,6 +292,17 @@ func initInternal(ctx *initContext) (*InitResult, error) {
 	clusterDesc := cluster.FindWinningClusterWithPreference(sharedReplicas, "", "", preferredUUID)
 
 	if clusterDesc == nil {
+		// Check if the caller is already healthy in a cluster. This handles the case where
+		// grastate calls to peers fail (e.g. auth token mismatch during a rolling deploy)
+		// but the cluster is actually running fine. If the caller itself reports primary+synced,
+		// trust its own state and return continue rather than looping forever on wait.
+		if ctx.callerInfo != nil && ctx.callerInfo.ClusterStatus == "primary" && ctx.callerInfo.NodeState == "synced" {
+			slog.Info("no cluster detected from peers but caller is already synced and primary — returning continue",
+				"callingReplica", ctx.originalCallingReplica)
+			tableSlots := DiscoverTableSlots(ctx.clients, tableNames)
+			return &InitResult{Action: "continue", TableSlots: tableSlots}, nil
+		}
+
 		// No cluster exists among available replicas - elect lowest-indexed replica as bootstrap leader
 		// Available replicas = caller + other available replicas
 		lowestAvailable := ctx.originalCallingReplica
