@@ -496,7 +496,11 @@ func importOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx in
 
 	slog.Debug("importing on replica", "replica", replicaIdx, "table", table)
 	if err := c.RunImport(goCtx, table, csvPath, cluster, 0, importConfig); err != nil {
-		return fmt.Errorf("import failed on replica %d: %w", replicaIdx, err)
+		if !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("import failed on replica %d: %w", replicaIdx, err)
+		}
+		slog.Info("table already exists on replica during import (replicated by peers or loaded from disk), verifying",
+			"replica", replicaIdx, "table", table)
 	}
 
 	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
