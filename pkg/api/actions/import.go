@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -505,7 +506,11 @@ func importOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx in
 			slog.Debug("CreateTable on retry (may already exist)", "error", createErr)
 		}
 		if retryErr := c.RunImport(goCtx, table, csvPath, cluster, 0, importConfig); retryErr != nil {
-			return fmt.Errorf("import retry failed on replica %d: %w", replicaIdx, retryErr)
+			if !strings.Contains(retryErr.Error(), "already exists") {
+				return fmt.Errorf("import retry failed on replica %d: %w", replicaIdx, retryErr)
+			}
+			slog.Info("table already exists on replica during retry (replicated by peers), verifying",
+				"replica", replicaIdx, "table", table)
 		}
 		if verifyErr := verifyTableExists(goCtx, c, table, replicaIdx); verifyErr != nil {
 			return fmt.Errorf("table verification failed after import retry on replica %d: %w", replicaIdx, verifyErr)
