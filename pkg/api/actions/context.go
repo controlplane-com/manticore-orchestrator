@@ -56,13 +56,11 @@ func (c *Context) SegmentMainTableName(slot string, seg int) string {
 	return fmt.Sprintf("%s_main_%s_%d", c.Dataset, slot, seg)
 }
 
-// SegmentDeltaTableName returns the delta table name for a given segment number.
-// When SegmentCount <= 1 (single-segment), returns the current naming (no suffix).
+// SegmentDeltaTableName returns the delta table name.
+// Delta tables are never segmented — all real-time writes go to a single delta table
+// regardless of segmentCount. The seg parameter is kept for API compatibility.
 func (c *Context) SegmentDeltaTableName(seg int) string {
-	if c.SegmentCount <= 1 {
-		return c.Dataset + "_delta"
-	}
-	return fmt.Sprintf("%s_delta_%d", c.Dataset, seg)
+	return c.Dataset + "_delta"
 }
 
 // AllMainTableNames returns all segment main table names for a given slot.
@@ -78,17 +76,10 @@ func (c *Context) AllMainTableNames(slot string) []string {
 	return names
 }
 
-// AllDeltaTableNames returns all segment delta table names.
+// AllDeltaTableNames returns the delta table name as a single-element slice.
+// Delta tables are never segmented regardless of segmentCount.
 func (c *Context) AllDeltaTableNames() []string {
-	count := c.SegmentCount
-	if count < 1 {
-		count = 1
-	}
-	names := make([]string, count)
-	for i := range names {
-		names[i] = c.SegmentDeltaTableName(i+1)
-	}
-	return names
+	return []string{c.DeltaTableName()}
 }
 
 // csvPathForSegment returns the CSV path for a given segment number (1-based).

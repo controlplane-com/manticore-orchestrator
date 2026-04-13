@@ -64,6 +64,31 @@ func Import(goCtx context.Context, ctx *Context) error {
 	distTable := ctx.DistributedTableName()
 	slog.Debug("import plan", "distTable", distTable, "newSlot", newSlot, "oldSlot", oldSlot, "segmentCount", ctx.SegmentCount, "clusterMain", tableConfig.ClusterMain)
 
+	// Pre-import cleanup: drop any existing new-slot tables from previous failed imports.
+	// Ensures IMPORT TABLE always starts from a clean slate and cannot hit "already exists"
+	// on tables left behind by a prior run whose failure-cleanup was incomplete.
+	for seg := 1; seg <= ctx.SegmentCount; seg++ {
+		newMainTable := ctx.SegmentMainTableName(newSlot, seg)
+		for i, c := range ctx.Clients {
+			if err := c.DropTable(newMainTable, 0); err != nil {
+				slog.Debug("pre-import cleanup: table not present", "table", newMainTable, "replica", i)
+			} else {
+				slog.Info("pre-import cleanup: dropped existing table", "table", newMainTable, "replica", i)
+			}
+		}
+	}
+	// Also clean up any orphaned per-segment delta tables from a previous multi-segment config.
+	for seg := 1; seg <= ctx.SegmentCount; seg++ {
+		orphanDelta := fmt.Sprintf("%s_delta_%d", ctx.Dataset, seg)
+		for i, c := range ctx.Clients {
+			if err := c.DropTable(orphanDelta, 0); err != nil {
+				slog.Debug("pre-import cleanup: orphan delta not present", "table", orphanDelta, "replica", i)
+			} else {
+				slog.Info("pre-import cleanup: dropped orphaned delta table", "table", orphanDelta, "replica", i)
+			}
+		}
+	}
+
 	// cleanup drops all new segment main tables on all replicas
 	cleanup := func() {
 		slog.Info("cleaning up failed import", "dataset", ctx.Dataset, "newSlot", newSlot, "segmentCount", ctx.SegmentCount)
@@ -217,6 +242,26 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
+	// Step 7b: Drop the unsuffixed old main table to handle upgrades from segmentCount=1.
+	// When segmentCount was 1, the table was named e.g. "addresses_main_a" (no segment suffix).
+	// The loop above only drops "addresses_main_a_1", "addresses_main_a_2", etc., so the
+	// original unsuffixed table becomes an orphan. Try to drop it.
+	if ctx.SegmentCount > 1 {
+		unsuffixedOld := ctx.MainTableName(oldSlot)
+		for i, c := range ctx.Clients {
+			if tableConfig.ClusterMain {
+				if err := c.ClusterDrop(unsuffixedOld, 1); err != nil {
+					slog.Debug("cluster drop unsuffixed old table skipped", "table", unsuffixedOld, "replica", i, "error", err)
+				}
+			}
+			if err := c.DropTable(unsuffixedOld, 1); err != nil {
+				slog.Debug("unsuffixed old table not present or already dropped", "table", unsuffixedOld, "replica", i, "error", err)
+			} else {
+				slog.Info("dropped unsuffixed old table", "table", unsuffixedOld, "replica", i)
+			}
+		}
+	}
+
 	slog.Info("import completed successfully", "clustered", tableConfig.ClusterMain, "segments", ctx.SegmentCount)
 	return nil
 }
@@ -313,9 +358,6 @@ func ensureTableOnReplica(goCtx context.Context, c *client.AgentClient, replicaI
 	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
 		slog.Warn("table missing on replica, re-importing",
 			"replica", replicaIdx, "table", table, "verifyErr", err)
-		if createErr := c.CreateTable(table, 0); createErr != nil {
-			slog.Debug("CreateTable before re-import (may already exist)", "error", createErr)
-		}
 		return importOnReplica(goCtx, c, replicaIdx, table, csvPath, "", importConfig)
 	}
 	return nil
@@ -506,9 +548,6 @@ func importOnReplica(goCtx context.Context, c *client.AgentClient, replicaIdx in
 	if err := verifyTableExists(goCtx, c, table, replicaIdx); err != nil {
 		slog.Warn("table not found after import, retrying once",
 			"replica", replicaIdx, "table", table, "verifyErr", err)
-		if createErr := c.CreateTable(table, 0); createErr != nil {
-			slog.Debug("CreateTable on retry (may already exist)", "error", createErr)
-		}
 		if retryErr := c.RunImport(goCtx, table, csvPath, cluster, 0, importConfig); retryErr != nil {
 			if !strings.Contains(retryErr.Error(), "already exists") {
 				return fmt.Errorf("import retry failed on replica %d: %w", replicaIdx, retryErr)
