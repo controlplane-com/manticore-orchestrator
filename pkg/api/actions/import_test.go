@@ -839,9 +839,10 @@ func TestImport_CleanupOnContextCancellation(t *testing.T) {
 }
 
 func TestImport_NoClusterDropOnFailure(t *testing.T) {
-	// Verify that a failed import never triggers ClusterDrop — cluster management
-	// is handled internally by the agent and the orchestrator never calls ClusterDrop
-	// on the new table.
+	// Verify that a failed import never triggers ClusterDrop on the *old* slot table
+	// during failure cleanup. Pre-import cleanup may call ClusterDrop on new-slot tables
+	// (best-effort, to clear orphans from prior failed runs). The agent handles cluster
+	// membership for tables that were successfully imported.
 	t.Setenv("IMPORT_POLL_INTERVAL", "100ms")
 	t.Setenv("SHARED_VOLUME_SYNC_DELAY", "0s")
 
@@ -918,14 +919,19 @@ func TestImport_NoClusterDropOnFailure(t *testing.T) {
 		t.Fatal("Import() should return error when import fails")
 	}
 
-	// Verify ClusterDrop was never called — the orchestrator does not manage cluster
-	// membership for the new table; the agent handles this internally.
+	// Verify ClusterDrop was never called on the old slot table (products_main_a) —
+	// the orchestrator only drops old tables after a successful swap, never during failure cleanup.
 	mu.Lock()
-	clusterDropCount := len(clusterDropCalls)
+	oldSlotDrops := []string{}
+	for _, tbl := range clusterDropCalls {
+		if strings.Contains(tbl, "_main_a") {
+			oldSlotDrops = append(oldSlotDrops, tbl)
+		}
+	}
 	mu.Unlock()
 
-	if clusterDropCount > 0 {
-		t.Errorf("ClusterDrop should NOT have been called, got: %v", clusterDropCalls)
+	if len(oldSlotDrops) > 0 {
+		t.Errorf("ClusterDrop should NOT have been called on old slot tables, got: %v", oldSlotDrops)
 	}
 }
 

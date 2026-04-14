@@ -67,10 +67,16 @@ func Import(goCtx context.Context, ctx *Context) error {
 	// Pre-import cleanup: drop any existing new-slot tables from previous failed imports.
 	// Ensures IMPORT TABLE always starts from a clean slate and cannot hit "already exists"
 	// on tables left behind by a prior run whose failure-cleanup was incomplete.
+	// maxRetries=1 (no retries) — cleanup is best-effort; unreachable replicas are skipped.
 	for seg := 1; seg <= ctx.SegmentCount; seg++ {
 		newMainTable := ctx.SegmentMainTableName(newSlot, seg)
 		for i, c := range ctx.Clients {
-			if err := c.DropTable(newMainTable, 0); err != nil {
+			if tableConfig.ClusterMain {
+				if err := c.ClusterDrop(newMainTable, 1); err != nil {
+					slog.Debug("pre-import cleanup: cluster drop skipped", "table", newMainTable, "replica", i)
+				}
+			}
+			if err := c.DropTable(newMainTable, 1); err != nil {
 				slog.Debug("pre-import cleanup: table not present", "table", newMainTable, "replica", i)
 			} else {
 				slog.Info("pre-import cleanup: dropped existing table", "table", newMainTable, "replica", i)
@@ -78,10 +84,14 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 	// Also clean up any orphaned per-segment delta tables from a previous multi-segment config.
+	// These are cluster tables so ClusterDrop must be called first.
 	for seg := 1; seg <= ctx.SegmentCount; seg++ {
 		orphanDelta := fmt.Sprintf("%s_delta_%d", ctx.Dataset, seg)
 		for i, c := range ctx.Clients {
-			if err := c.DropTable(orphanDelta, 0); err != nil {
+			if err := c.ClusterDrop(orphanDelta, 1); err != nil {
+				slog.Debug("pre-import cleanup: orphan delta cluster drop skipped", "table", orphanDelta, "replica", i)
+			}
+			if err := c.DropTable(orphanDelta, 1); err != nil {
 				slog.Debug("pre-import cleanup: orphan delta not present", "table", orphanDelta, "replica", i)
 			} else {
 				slog.Info("pre-import cleanup: dropped orphaned delta table", "table", orphanDelta, "replica", i)
@@ -89,15 +99,20 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
-	// cleanup drops all new segment main tables on all replicas
+	// cleanup attempts to drop all new segment main tables on all replicas
 	cleanup := func() {
 		slog.Info("cleaning up failed import", "dataset", ctx.Dataset, "newSlot", newSlot, "segmentCount", ctx.SegmentCount)
 
 		for seg := 1; seg <= ctx.SegmentCount; seg++ {
 			newMainTable := ctx.SegmentMainTableName(newSlot, seg)
 			for i, c := range ctx.Clients {
-				if err := c.DropTable(newMainTable, 0); err != nil {
-					slog.Error("failed to drop table during cleanup", "table", newMainTable, "replica", i, "error", err)
+				if tableConfig.ClusterMain {
+					if err := c.ClusterDrop(newMainTable, 1); err != nil {
+						slog.Debug("cleanup: cluster drop skipped", "table", newMainTable, "replica", i)
+					}
+				}
+				if err := c.DropTable(newMainTable, 1); err != nil {
+					slog.Debug("cleanup: table not present or unreachable", "table", newMainTable, "replica", i, "error", err)
 				}
 			}
 		}
