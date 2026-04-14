@@ -403,17 +403,27 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 
 		slog.Debug("ensuring tables", "table", tableName, "activeSlot", activeSlot, "segmentCount", segmentCount, "clusterMain", clusterMain)
 
-		var allLocals []string
+		// Delta is always a single table regardless of segmentCount.
+		// All real-time writes go to one delta; segments only apply to main tables.
+		deltaTable := tableName + "_delta"
+
+		// Create delta table and add to cluster (idempotent)
+		if err := handler.CreateTable(deltaTable); err != nil {
+			return fmt.Errorf("failed to create delta table: %w", err)
+		}
+		if err := handler.ClusterAdd(deltaTable); err != nil {
+			return fmt.Errorf("failed to add delta to cluster: %w", err)
+		}
+
+		allLocals := []string{deltaTable}
 		for seg := 1; seg <= segmentCount; seg++ {
-			var mainTable, otherMainTable, deltaTable string
+			var mainTable, otherMainTable string
 			if segmentCount == 1 {
 				mainTable = tableName + "_main_" + activeSlot
 				otherMainTable = tableName + "_main_" + otherSlot
-				deltaTable = tableName + "_delta"
 			} else {
 				mainTable = fmt.Sprintf("%s_main_%s_%d", tableName, activeSlot, seg)
 				otherMainTable = fmt.Sprintf("%s_main_%s_%d", tableName, otherSlot, seg)
-				deltaTable = fmt.Sprintf("%s_delta_%d", tableName, seg)
 			}
 
 			slog.Debug("ensuring segment tables", "table", tableName, "seg", seg, "mainTable", mainTable, "deltaTable", deltaTable)
@@ -430,16 +440,6 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 				}
 			}
 
-			// Create delta table
-			if err := handler.CreateTable(deltaTable); err != nil {
-				return fmt.Errorf("failed to create delta table: %w", err)
-			}
-
-			// Add delta to cluster (idempotent - handles "already in cluster") - delta is always clustered
-			if err := handler.ClusterAdd(deltaTable); err != nil {
-				return fmt.Errorf("failed to add delta to cluster: %w", err)
-			}
-
 			// Create main table
 			if err := handler.CreateTable(mainTable); err != nil {
 				return fmt.Errorf("failed to create main table: %w", err)
@@ -454,7 +454,7 @@ func ensureTables(handler *handlers.Handler, registry *manticore.SchemaRegistry,
 				slog.Debug("skipping cluster add for main table (clusterMain=false)", "table", mainTable)
 			}
 
-			allLocals = append(allLocals, mainTable, deltaTable)
+			allLocals = append(allLocals, mainTable)
 		}
 
 		// Create distributed table pointing to all segment main+delta tables
