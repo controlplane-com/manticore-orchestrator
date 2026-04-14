@@ -197,6 +197,15 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
+	// Step 5c: Ensure delta table exists on all replicas before the swap.
+	// On a fresh cluster the delta table may not exist yet. CreateTable is idempotent.
+	deltaTable := ctx.DeltaTableName()
+	for i, c := range ctx.Clients {
+		if err := c.CreateTable(deltaTable, 1); err != nil {
+			slog.Warn("failed to ensure delta table exists", "table", deltaTable, "replica", i, "error", err)
+		}
+	}
+
 	// Step 6: Atomic swap - ALTER distributed table on ALL replicas with all segments
 	allNewMains := ctx.AllMainTableNames(newSlot)
 	allDeltas := ctx.AllDeltaTableNames()
