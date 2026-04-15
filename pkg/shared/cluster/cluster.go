@@ -96,9 +96,12 @@ func FindWinningCluster(replicas []ReplicaInfo, workloadName, replicationPort st
 		}
 	}
 
-	// Within winning group, find node with highest seqno (most up-to-date)
-	var highestSeqno int64 = -1
-	var sourceIdx int
+	// Within winning group, find node with highest seqno (most up-to-date).
+	// Initialize sourceIdx to the first winning node so that when all seqnos are -1
+	// (Galera's value for "safe state"), we still return a node from the winning group
+	// instead of defaulting to replica 0 (which may not be in the winning group).
+	sourceIdx := winningNodes[0]
+	var highestSeqno int64 = math.MinInt64
 	for _, nodeIdx := range winningNodes {
 		seqno := replicas[nodeIdx].Seqno
 		if seqno > highestSeqno {
@@ -191,9 +194,10 @@ func FindWinningClusterWithPreference(replicas []ReplicaInfo, workloadName, repl
 		}
 	}
 
-	// Within winning group, find node with highest seqno (most up-to-date)
-	var highestSeqno int64 = -1
-	var sourceIdx int
+	// Within winning group, find node with highest seqno (most up-to-date).
+	// Initialize sourceIdx to the first winning node (same fix as FindWinningCluster).
+	sourceIdx := winningNodes[0]
+	var highestSeqno int64 = math.MinInt64
 	for _, nodeIdx := range winningNodes {
 		seqno := replicas[nodeIdx].Seqno
 		if seqno > highestSeqno {

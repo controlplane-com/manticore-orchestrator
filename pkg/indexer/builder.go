@@ -169,7 +169,18 @@ func (b *IndexBuilder) Build(ctx context.Context, cfg *Config) (*BuildResult, er
 		return nil, fmt.Errorf("ATTACH INDEX failed: %w", err)
 	}
 
-	// Step 9: Verify row count
+	// Step 9: Rebuild the secondary index before stopping searchd.
+	// The .spidx file is written into workDir/data/<table>/ alongside the other RT index files.
+	// Since IMPORT TABLE copies all files in that directory, every replica receives the secondary
+	// index for free — no per-replica rebuild needed after import.
+	rebuildSQL := fmt.Sprintf("ALTER TABLE %s REBUILD SECONDARY", cfg.TableName)
+	slog.Info("rebuilding secondary index", "table", cfg.TableName, "sql", rebuildSQL)
+	if _, err := tempDB.ExecContext(ctx, rebuildSQL); err != nil {
+		// Non-fatal: secondary index improves performance but queries still work without it.
+		slog.Warn("failed to rebuild secondary index during build, continuing", "table", cfg.TableName, "error", err)
+	}
+
+	// Step 10: Verify row count
 	var rowCount int64
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM %s", cfg.TableName)
 	if err := tempDB.QueryRowContext(ctx, countSQL).Scan(&rowCount); err != nil {

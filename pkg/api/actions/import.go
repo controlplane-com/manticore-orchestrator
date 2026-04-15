@@ -197,6 +197,20 @@ func Import(goCtx context.Context, ctx *Context) error {
 		}
 	}
 
+	// Step 5b-2: Second verification pass immediately before ALTER.
+	// A pod restart during the first pass's re-import of one segment can cause a previously
+	// verified segment to disappear (the restart wipes all local tables). This second pass
+	// catches any such late losses — without it, ALTER fails with "no such local table".
+	slog.Debug("running final pre-swap verification pass")
+	for _, si := range segs {
+		for i, c := range ctx.Clients {
+			if err := ensureTableOnReplica(goCtx, c, i, si.mainTable, si.csvPath, si.importConfig); err != nil {
+				cleanup()
+				return fmt.Errorf("table recovery failed during final pre-swap verification: %w", err)
+			}
+		}
+	}
+
 	// Step 5c: Ensure delta table exists on all replicas before the swap.
 	// On a fresh cluster the delta table may not exist yet. CreateTable is idempotent.
 	deltaTable := ctx.DeltaTableName()
