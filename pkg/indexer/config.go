@@ -56,6 +56,9 @@ func GenerateSearchdConfig(cfg *Config) string {
 	sb.WriteString(fmt.Sprintf("    query_log = %s/log/query.log\n", cfg.WorkDir))
 	sb.WriteString(fmt.Sprintf("    pid_file = %s/searchd.pid\n", cfg.WorkDir))
 	sb.WriteString(fmt.Sprintf("    binlog_path = %s/binlog\n", cfg.WorkDir))
+	// Load the columnar library so REBUILD SECONDARY works during the build phase,
+	// writing the .spidx file to the shared volume for IMPORT TABLE to pick up on all replicas.
+	sb.WriteString("    plugin_dir = /usr/share/manticore/modules\n")
 	sb.WriteString("}\n\n")
 
 	// Plain index (for ATTACH source) — no charset_table, must match RT below
