@@ -24,8 +24,9 @@ COPY pkg/ ./pkg/
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -o /agent ./cmd/agent
 
-# Runtime stage - use manticore image as base
-FROM manticoresearch/manticore:latest
+# Runtime stage - use manticore image as base.
+# Pinned to match the version used by the API image and the Manticore nodes.
+FROM manticoresearch/manticore:15.1.0
 
 # Install mysql client for piping INSERT statements
 RUN apt-get update && apt-get install -y default-mysql-client && rm -rf /var/lib/apt/lists/*
