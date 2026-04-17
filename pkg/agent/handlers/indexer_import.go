@@ -28,6 +28,16 @@ func (h *Handler) RunIndexerImport(ctx context.Context, job *types.ImportJob, sc
 		return fmt.Errorf("failed to stat prebuilt index at %s: %w", metaPath, err)
 	}
 
+	// Drop the table immediately before importing. The orchestrator already runs DROP TABLE
+	// during pre-import cleanup, but that happens before the index build (~5+ seconds earlier).
+	// If a previous import left a directory on disk that Manticore didn't clean up on DROP TABLE,
+	// this gives Manticore one more chance to clear it right before IMPORT TABLE runs.
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", job.Table)
+	slog.Debug("dropping table before import", "table", job.Table)
+	if err := h.client.Execute(dropSQL); err != nil {
+		slog.Warn("pre-import drop failed (continuing)", "table", job.Table, "error", err)
+	}
+
 	// Execute IMPORT TABLE
 	importSQL := fmt.Sprintf("IMPORT TABLE %s FROM '%s'", job.Table, job.PrebuiltIndexPath)
 	slog.Info("importing prebuilt index", "table", job.Table, "path", job.PrebuiltIndexPath)
