@@ -51,6 +51,16 @@ func (h *Handler) RunIndexerImport(ctx context.Context, job *types.ImportJob, sc
 		return fmt.Errorf("IMPORT TABLE failed: %w", err)
 	}
 
+	// Enable secondary indexes on the imported table. The plain index built by the indexer
+	// already contains a .spidx file which ATTACH carries into the RT as chunk 0. Enabling
+	// secondary_indexes here tells this node's searchd to use that file. The production
+	// node's config has data_dir set, so ALTER TABLE works here (unlike the temp searchd).
+	enableSQL := fmt.Sprintf("ALTER TABLE %s secondary_indexes='1'", job.Table)
+	slog.Info("enabling secondary indexes on imported table", "table", job.Table)
+	if err := h.client.Execute(enableSQL); err != nil {
+		slog.Warn("failed to enable secondary indexes after import (non-fatal)", "table", job.Table, "error", err)
+	}
+
 	slog.Info("prebuilt index imported successfully", "table", job.Table)
 	return nil
 }
