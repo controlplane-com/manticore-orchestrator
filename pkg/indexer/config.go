@@ -63,6 +63,7 @@ func GenerateSearchdConfig(cfg *Config) string {
 	sb.WriteString(fmt.Sprintf("    query_log = %s/log/query.log\n", cfg.WorkDir))
 	sb.WriteString(fmt.Sprintf("    pid_file = %s/searchd.pid\n", cfg.WorkDir))
 	sb.WriteString(fmt.Sprintf("    binlog_path = %s/binlog\n", cfg.WorkDir))
+	sb.WriteString(fmt.Sprintf("    data_dir = %s/data\n", cfg.WorkDir))
 	sb.WriteString("}\n\n")
 
 	// Plain index (for ATTACH source) — no charset_table, must match RT below
