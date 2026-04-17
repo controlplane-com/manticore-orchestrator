@@ -172,7 +172,7 @@ func (b *IndexBuilder) Build(ctx context.Context, cfg *Config) (*BuildResult, er
 	// Step 9: Enable secondary indexes on the RT table (SQL-only option, cannot be set in
 	// sphinx config), then rebuild. The .spidx file is written alongside the other RT index
 	// files so every replica receives it automatically via IMPORT TABLE.
-	enableSQL := fmt.Sprintf("ALTER TABLE %s secondary_indexes=1", cfg.TableName)
+	enableSQL := fmt.Sprintf("ALTER TABLE %s secondary_indexes='1'", cfg.TableName)
 	slog.Info("enabling secondary indexes on RT table", "table", cfg.TableName, "sql", enableSQL)
 	if _, err := tempDB.ExecContext(ctx, enableSQL); err != nil {
 		slog.Warn("failed to enable secondary indexes, skipping rebuild", "table", cfg.TableName, "error", err)

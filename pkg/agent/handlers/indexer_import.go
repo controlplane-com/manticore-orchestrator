@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/manticore"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/shared/types"
 )
+
+const manticoreDataDir = "/var/lib/manticore"
 
 // RunIndexerImport imports a pre-built index from the given path
 // The index must have been built by the API and uploaded to S3
@@ -28,15 +31,17 @@ func (h *Handler) RunIndexerImport(ctx context.Context, job *types.ImportJob, sc
 		return fmt.Errorf("failed to stat prebuilt index at %s: %w", metaPath, err)
 	}
 
-	// Drop the table immediately before importing. The orchestrator already runs DROP TABLE
-	// during pre-import cleanup, but that happens before the index build (~5+ seconds earlier).
-	// If a previous import left a directory on disk that Manticore didn't clean up on DROP TABLE,
-	// this gives Manticore one more chance to clear it right before IMPORT TABLE runs.
-	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", job.Table)
-	slog.Debug("dropping table before import", "table", job.Table)
-	if err := h.client.Execute(dropSQL); err != nil {
-		slog.Warn("pre-import drop failed (continuing)", "table", job.Table, "error", err)
+	// Remove the table's data directory before importing. Manticore's DROP TABLE removes the
+	// table from metadata but does not delete the directory on disk. On pod restart, Manticore
+	// rescans /var/lib/manticore and re-registers any directory it finds, so the table reappears
+	// in SHOW TABLES. IMPORT TABLE then fails with "directory is not empty". Removing the
+	// directory here breaks this cycle — it is safe because this is the inactive-slot table
+	// that was already logically dropped before the index build began.
+	tableDataDir := filepath.Join(manticoreDataDir, job.Table)
+	if err := os.RemoveAll(tableDataDir); err != nil {
+		return fmt.Errorf("failed to clear data directory %s before import: %w", tableDataDir, err)
 	}
+	slog.Info("cleared table data directory before import", "dir", tableDataDir)
 
 	// Execute IMPORT TABLE
 	importSQL := fmt.Sprintf("IMPORT TABLE %s FROM '%s'", job.Table, job.PrebuiltIndexPath)
