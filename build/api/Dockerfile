@@ -18,12 +18,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /orchestrator ./cmd/api
 
 # Runtime stage - use Manticore image for indexer/searchd binaries.
 # Version must match the Manticore nodes so that index files (including .spidx) are format-compatible.
-FROM manticoresearch/manticore:15.1.0
+FROM manticoresearch/manticore:25.0.0
 
-# Install ca-certificates for HTTPS calls and the columnar library for secondary index support.
-# The columnar lib enables REBUILD SECONDARY during the index build phase so that the .spidx file
-# is included in the shared volume and imported to all replicas automatically.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates manticore-columnar-lib && rm -rf /var/lib/apt/lists/*
+# Install ca-certificates for HTTPS calls. MCL (columnar library) is bundled in 25.0.0.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Copy the orchestrator binary
 COPY --from=go-builder /orchestrator /orchestrator
