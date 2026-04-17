@@ -3,6 +3,12 @@ name: Publish Docker Image
 on:
   push:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to publish (e.g. v6.0.0). Leave blank to auto-increment patch.'
+        required: false
+        default: ''
 
 jobs:
   publish:
@@ -23,10 +29,14 @@ jobs:
           if [ -z "$LATEST" ]; then
             LATEST="v5.2.1"
           fi
-          MAJOR=$(echo $LATEST | cut -d. -f1 | tr -d 'v')
-          MINOR=$(echo $LATEST | cut -d. -f2)
-          PATCH=$(echo $LATEST | cut -d. -f3)
-          NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            NEW_TAG="${{ github.event.inputs.version }}"
+          else
+            MAJOR=$(echo $LATEST | cut -d. -f1 | tr -d 'v')
+            MINOR=$(echo $LATEST | cut -d. -f2)
+            PATCH=$(echo $LATEST | cut -d. -f3)
+            NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
           echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
 
       - name: Log in to GHCR
