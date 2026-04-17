@@ -73,12 +73,11 @@ func GenerateSearchdConfig(cfg *Config) string {
 
 	// RT index (target for ATTACH) — no charset_table so it matches the plain index above,
 	// allowing ATTACH to succeed. The production RT's charset is set via CREATE TABLE SQL.
-	// secondary_indexes=1 enables the PGM secondary index so REBUILD SECONDARY can write
-	// the .spidx file into the work directory before the index is imported to all replicas.
+	// secondary_indexes is a SQL-only option and cannot be set here; the columnar library
+	// loaded via common{plugin_dir} is sufficient for REBUILD SECONDARY to work.
 	sb.WriteString(fmt.Sprintf("index %s {\n", cfg.TableName))
 	sb.WriteString("    type = rt\n")
 	sb.WriteString(fmt.Sprintf("    path = %s/data/%s\n", cfg.WorkDir, cfg.TableName))
-	sb.WriteString("    secondary_indexes=1\n")
 
 	// RT column definitions
 	for _, col := range cfg.Columns {
