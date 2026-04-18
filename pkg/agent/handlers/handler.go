@@ -10,7 +10,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/jobs"
 	"github.com/controlplane-com/manticore-orchestrator/pkg/agent/manticore"
@@ -680,31 +679,15 @@ func (h *Handler) ClusterJoin(sourceAddr string) error {
 	slog.Debug("joining cluster", "cluster", h.clusterName, "sourceAddr", sourceAddr, "sql", sql)
 
 	if err := h.client.Execute(sql); err != nil {
-		// During SST (state snapshot transfer), Manticore on the joining node restarts,
-		// which drops the local MySQL connection mid-query. This is normal — the join may
-		// have succeeded. Poll for synced status before treating this as a real failure.
-		slog.Warn("JOIN CLUSTER returned error (may be normal SST restart), polling for sync", "error", err)
-		if syncErr := h.waitForClusterSync(10 * time.Minute); syncErr == nil {
-			slog.Info("cluster join confirmed via status poll despite connection drop")
-			return nil
-		}
+		// During SST (state snapshot transfer), the joining node's Manticore restarts and
+		// drops the local MySQL connection mid-query. Log a warning but return the error so
+		// the agentInit retry loop retries in 5 seconds. On the next attempt, GetClusterHealth
+		// will report primary/synced (if SST completed) and the orchestrator returns "continue".
+		slog.Warn("JOIN CLUSTER returned error (may be normal SST connection drop)", "error", err)
 		return fmt.Errorf("failed to join cluster: %w", err)
 	}
 
 	return nil
-}
-
-// waitForClusterSync polls until the node is synced or the timeout is reached
-func (h *Handler) waitForClusterSync(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		status, err := h.client.GetClusterStatus(h.clusterName)
-		if err == nil && (status == "primary" || status == "synced") {
-			return nil
-		}
-	}
-	return fmt.Errorf("timed out waiting for cluster sync after %s", timeout)
 }
 
 // ClusterJoinHandler is the HTTP handler for ClusterJoin
