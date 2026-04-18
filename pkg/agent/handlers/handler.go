@@ -56,6 +56,17 @@ func successResponse(w http.ResponseWriter, message string) {
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	status, err := h.client.GetStatus()
 	if err != nil {
+		// During SST (state snapshot transfer) the joining node's Manticore restarts briefly.
+		// If init hasn't completed yet, treat a Manticore connection failure as a transient
+		// startup condition rather than a liveness failure — killing the pod during SST would
+		// restart the whole join process unnecessarily.
+		if !Initialized() {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"status": "starting",
+				"reason": "searchd temporarily unavailable during initialization",
+			})
+			return
+		}
 		errorResponse(w, http.StatusServiceUnavailable, fmt.Sprintf("searchd not ready: %v", err))
 		return
 	}
