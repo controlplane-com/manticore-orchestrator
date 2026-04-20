@@ -498,23 +498,15 @@ func (h *Handler) CreateDistributed(tableName string, locals []string, agents []
 		}
 	}
 
-	// Check if table already exists
-	exists, err := h.client.TableExists(tableName)
-	if err != nil {
-		return fmt.Errorf("failed to check table existence: %w", err)
+	// Always drop and recreate — distributed tables hold no data, so this is safe.
+	// ALTER TABLE on a distributed table can fail in 25.0.0 after SST restores the table
+	// definition to disk but Manticore hasn't loaded it cleanly into memory.
+	dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)
+	slog.Debug("dropping distributed table before recreate", "table", tableName)
+	if err := h.client.Execute(dropSQL); err != nil {
+		return fmt.Errorf("failed to drop distributed table: %w", err)
 	}
 
-	if exists {
-		// Table exists - ALTER to ensure it points to correct locals/agents
-		sql := fmt.Sprintf("ALTER TABLE %s %s", tableName, strings.Join(clauses, " "))
-		slog.Debug("altering distributed table", "table", tableName, "sql", sql)
-		if err := h.client.Execute(sql); err != nil {
-			return fmt.Errorf("failed to alter distributed table: %w", err)
-		}
-		return nil
-	}
-
-	// Table doesn't exist - CREATE it
 	sql := fmt.Sprintf("CREATE TABLE %s TYPE='distributed' %s", tableName, strings.Join(clauses, " "))
 	slog.Debug("creating distributed table", "table", tableName, "sql", sql)
 
