@@ -361,6 +361,14 @@ func (h *Handler) CreateTable(tableName string) error {
 		return fmt.Errorf("failed to create table: %w", err)
 	}
 
+	if schema.SecondaryIndexes {
+		alterSQL := fmt.Sprintf("ALTER TABLE %s secondary_indexes='1'", tableName)
+		slog.Debug("enabling secondary indexes", "table", tableName)
+		if err := h.client.Execute(alterSQL); err != nil {
+			slog.Warn("failed to enable secondary indexes (non-fatal)", "table", tableName, "error", err)
+		}
+	}
+
 	return nil
 }
 

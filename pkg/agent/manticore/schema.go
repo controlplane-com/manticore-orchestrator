@@ -37,15 +37,16 @@ type Column struct {
 
 // Schema represents the parsed schema configuration
 type Schema struct {
-	Columns         []Column
-	JSONConfig      string // Raw JSON for passing to csv-to-manticore
-	ClusterMain     bool   // Whether to add main table to cluster, defaults to true
-	HAStrategy      string // HA strategy for distributed table mirrors, defaults to "nodeads"
-	AgentRetryCount int    // Retry count for failed agents, defaults to 0
-	SegmentCount    int    // Number of segments in the distributed table, defaults to 1
-	MemLimit        string // Indexer memory limit, defaults to "2G"
-	HasHeader       *bool  // Whether source file has a header row, nil = auto-detect
-	CharsetTable    string // Manticore charset_table option (e.g. "non_cont"), empty = use default
+	Columns          []Column
+	JSONConfig       string // Raw JSON for passing to csv-to-manticore
+	ClusterMain      bool   // Whether to add main table to cluster, defaults to true
+	HAStrategy       string // HA strategy for distributed table mirrors, defaults to "nodeads"
+	AgentRetryCount  int    // Retry count for failed agents, defaults to 0
+	SegmentCount     int    // Number of segments in the distributed table, defaults to 1
+	MemLimit         string // Indexer memory limit, defaults to "2G"
+	HasHeader        *bool  // Whether source file has a header row, nil = auto-detect
+	CharsetTable     string // Manticore charset_table option (e.g. "non_cont"), empty = use default
+	SecondaryIndexes bool   // Whether to enable secondary indexes on RT tables (ALTER TABLE secondary_indexes='1')
 }
 
 // csv-to-manticore type to ColumnType mapping
@@ -154,13 +155,14 @@ type SchemaRegistry struct {
 
 // TableBehaviorConfig holds per-table behavior settings
 type TableBehaviorConfig struct {
-	ClusterMain     *bool  `yaml:"clusterMain" json:"clusterMain"`         // Use pointer for nil-check (default true)
-	HAStrategy      string `yaml:"haStrategy" json:"haStrategy"`           // "random", "roundrobin", "nodeads" (default), "noerrors"
-	AgentRetryCount *int   `yaml:"agentRetryCount" json:"agentRetryCount"` // Pointer for nil-check (default 0)
-	SegmentCount    int    `yaml:"segmentCount" json:"segmentCount"`       // Number of distributed table segments (default 1)
-	MemLimit        string `yaml:"memLimit" json:"memLimit"`               // Indexer memory limit (default "2G")
-	HasHeader       *bool  `yaml:"hasHeader" json:"hasHeader"`             // Whether source file has a header row (default: auto-detect)
-	CharsetTable    string `yaml:"charsetTable" json:"charsetTable"`       // Manticore charset_table option (e.g. "non_cont")
+	ClusterMain      *bool  `yaml:"clusterMain" json:"clusterMain"`               // Use pointer for nil-check (default true)
+	HAStrategy       string `yaml:"haStrategy" json:"haStrategy"`                 // "random", "roundrobin", "nodeads" (default), "noerrors"
+	AgentRetryCount  *int   `yaml:"agentRetryCount" json:"agentRetryCount"`       // Pointer for nil-check (default 0)
+	SegmentCount     int    `yaml:"segmentCount" json:"segmentCount"`             // Number of distributed table segments (default 1)
+	MemLimit         string `yaml:"memLimit" json:"memLimit"`                     // Indexer memory limit (default "2G")
+	HasHeader        *bool  `yaml:"hasHeader" json:"hasHeader"`                   // Whether source file has a header row (default: auto-detect)
+	CharsetTable     string `yaml:"charsetTable" json:"charsetTable"`             // Manticore charset_table option (e.g. "non_cont")
+	SecondaryIndexes bool   `yaml:"secondaryIndexes" json:"secondaryIndexes"`     // Enable secondary indexes on RT tables (default false)
 }
 
 // SchemaConfig represents the YAML structure for a single table schema (JSON format)
@@ -219,15 +221,16 @@ func (r *SchemaRegistry) LoadFromFile(path string) error {
 		}
 
 		r.schemas[tableName] = &Schema{
-			Columns:         config.Schema.Columns,
-			JSONConfig:      string(jsonConfig),
-			ClusterMain:     clusterMain,
-			HAStrategy:      haStrategy,
-			AgentRetryCount: agentRetryCount,
-			SegmentCount:    segmentCount,
-			MemLimit:        config.Config.MemLimit,
-			HasHeader:       config.Config.HasHeader,
-			CharsetTable:    config.Config.CharsetTable,
+			Columns:          config.Schema.Columns,
+			JSONConfig:       string(jsonConfig),
+			ClusterMain:      clusterMain,
+			HAStrategy:       haStrategy,
+			AgentRetryCount:  agentRetryCount,
+			SegmentCount:     segmentCount,
+			MemLimit:         config.Config.MemLimit,
+			HasHeader:        config.Config.HasHeader,
+			CharsetTable:     config.Config.CharsetTable,
+			SecondaryIndexes: config.Config.SecondaryIndexes,
 		}
 	}
 
